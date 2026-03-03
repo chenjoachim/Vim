@@ -53,12 +53,41 @@ class INatDataset(ImageFolder):
     # __getitem__ and __len__ inherited from ImageFolder
 
 
+# Imagenette synset → ImageNet class index mapping
+IMAGENETTE_SYNSET_TO_IMAGENET_IDX = {
+    'n01440764': 0,   # tench
+    'n02102040': 217, # English springer
+    'n02979186': 482, # cassette player
+    'n03000684': 491, # chain saw
+    'n03028079': 497, # church
+    'n03394916': 566, # French horn
+    'n03417042': 569, # garbage truck
+    'n03425413': 571, # gas pump
+    'n03445777': 574, # golf ball
+    'n03888257': 701, # parachute
+}
+
+class ImagenetteDataset(ImageFolder):
+    """ImageFolder that remaps imagenette labels to their ImageNet-1000 class indices."""
+    def __init__(self, root, transform=None):
+        super().__init__(root, transform=transform)
+        # class_to_idx maps synset_name -> folder_idx (0-9); remap to ImageNet indices
+        remap = {folder_idx: IMAGENETTE_SYNSET_TO_IMAGENET_IDX[synset]
+                 for synset, folder_idx in self.class_to_idx.items()}
+        self.samples = [(path, remap[label]) for path, label in self.samples]
+        self.targets = [remap[t] for t in self.targets]
+
+
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
 
     if args.data_set == 'CIFAR':
         dataset = datasets.CIFAR100(args.data_path, train=is_train, transform=transform)
         nb_classes = 100
+    elif args.data_set == 'IMAGENETTE':
+        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+        dataset = ImagenetteDataset(root, transform=transform)
+        nb_classes = 1000
     elif args.data_set == 'IMNET':
         root = os.path.join(args.data_path, 'train' if is_train else 'val')
         dataset = datasets.ImageFolder(root, transform=transform)
