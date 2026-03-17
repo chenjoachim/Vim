@@ -181,13 +181,7 @@ class Mamba(nn.Module):
                 return out
 
         # We do matmul and transpose BLH -> HBL at the same time
-        xz = rearrange(
-            self.in_proj.weight @ rearrange(hidden_states, "b l d -> d (b l)"),
-            "d (b l) -> b d l",
-            l=seqlen,
-        )
-        if self.in_proj.bias is not None:
-            xz = xz + rearrange(self.in_proj.bias.to(dtype=xz.dtype), "d -> d 1")
+        xz = self.in_proj(hidden_states).permute(0, 2, 1)
 
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
@@ -216,8 +210,8 @@ class Mamba(nn.Module):
                     xz,
                     self.conv1d.weight,
                     self.conv1d.bias,
-                    self.x_proj.weight,
-                    self.dt_proj.weight,
+                    self.x_proj,
+                    self.dt_proj,
                     A,
                     None,  # input-dependent B
                     None,  # input-dependent C
@@ -229,8 +223,8 @@ class Mamba(nn.Module):
                     xz.flip([-1]),
                     self.conv1d_b.weight,
                     self.conv1d_b.bias,
-                    self.x_proj_b.weight,
-                    self.dt_proj_b.weight,
+                    self.x_proj_b,
+                    self.dt_proj_b,
                     A_b,
                     None,
                     None,
@@ -240,9 +234,9 @@ class Mamba(nn.Module):
                 )
                 # F.linear(rearrange(out_z, "b d l -> b l d"), out_proj_weight, out_proj_bias)
                 if not self.if_divide_out:
-                    out = F.linear(rearrange(out + out_b.flip([-1]), "b d l -> b l d"), self.out_proj.weight, self.out_proj.bias)
+                    out = self.out_proj(rearrange(out + out_b.flip([-1]), "b d l -> b l d"))
                 else:
-                    out = F.linear(rearrange(out + out_b.flip([-1]), "b d l -> b l d") / 2, self.out_proj.weight, self.out_proj.bias)
+                    out = self.out_proj(rearrange(out + out_b.flip([-1]), "b d l -> b l d") / 2)
 
             else:
                 out = mamba_inner_fn(
