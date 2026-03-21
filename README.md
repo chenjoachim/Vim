@@ -99,6 +99,75 @@ env -u SLURM_PROCID python vim/main.py --eval \
 --resume ./checkpoints/vim_t_midclstok_76p1acc.pth \
 --data-path ./imagenette2-320 --batch-size 64 --data-set IMAGENETTE
 ```
+## Post-Training Quantization (PTQ4VM)
+
+This branch adds PTQ4VM support for quantizing Vim models after training.
+
+### Quick Start
+
+Run the full pipeline (activation scale generation + quantization + evaluation) with a single script:
+
+```bash
+# Via SLURM
+sbatch vim/scripts/ptq.sh
+
+# Or directly
+bash vim/scripts/ptq.sh
+```
+
+### Step-by-Step Usage
+
+**1. Generate activation scales**
+
+```bash
+python vim/generate_act_scale.py \
+  --model vim_tiny_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_midclstok_div2 \
+  --resume checkpoints/vim_t_midclstok_76p1acc.pth \
+  --data-path data/imagenet \
+  --data-set IMNET \
+  --batch-size 32 \
+  --scales-output-path ./act_scales/vim_t_imnet/ \
+  --calib-use-val
+```
+
+**2. Run quantization and evaluation**
+
+```bash
+python vim/quant.py \
+  --model vim_tiny_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_midclstok_div2 \
+  --resume checkpoints/vim_t_midclstok_76p1acc.pth \
+  --data-path data/imagenet \
+  --data-set IMNET \
+  --act_scales ./act_scales/vim_t_imnet/smoothing_t.pt \
+  --qmode ptq4vm \
+  --n-lvw 256 --n-lva 256 \
+  --alpha 0.5 \
+  --epochs 30 \
+  --batch-size 32 \
+  --train-batch 16 \
+  --calib-use-val
+```
+
+### Key Arguments
+
+| Argument | Default | Description |
+|:--|:--|:--|
+| `--qmode` | `ptq4vm` | Quantization mode |
+| `--n-lvw` | `256` | Number of weight quantization levels |
+| `--n-lva` | `256` | Number of activation quantization levels |
+| `--alpha` | `0.5` | Smoothing factor for activation-weight balancing |
+| `--epochs` | `100` | Layer-wise optimization iterations |
+| `--train-batch` | `256` | Sub-batch size for layer-wise optimization |
+| `--calib-use-val` | `false` | Use validation split for calibration (no train split needed) |
+| `--act_scales` | - | Path to precomputed activation scales (.pt file) |
+| `--scales-output-path` | - | Directory to save generated activation scales |
+
+### Notes
+
+- The `--calib-use-val` flag allows running the full pipeline without downloading the ImageNet train split. Calibration only uses forward passes (no labels), so using the validation split is safe.
+- The activation scales file is named automatically based on model size: `smoothing_t.pt` (tiny), `smoothing_s.pt` (small), `smoothing_b.pt` (base).
+- Both Imagenette (`--data-set IMAGENETTE`) and ImageNet (`--data-set IMNET`) are supported.
+
 ## Acknowledgement :heart:
 This project is based on Mamba ([paper](https://arxiv.org/abs/2312.00752), [code](https://github.com/state-spaces/mamba)), Causal-Conv1d ([code](https://github.com/Dao-AILab/causal-conv1d)), DeiT ([paper](https://arxiv.org/abs/2012.12877), [code](https://github.com/facebookresearch/deit)). Thanks for their wonderful works.
 

@@ -88,6 +88,8 @@ def get_args_parser():
     parser.add_argument('--inat-category', default='name',
                         choices=['kingdom', 'phylum', 'class', 'order', 'supercategory', 'family', 'genus', 'name'],
                         type=str, help='semantic granularity')
+    parser.add_argument('--calib-use-val', action='store_true',
+                        help='Use validation split instead of train split for calibration')
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
@@ -149,7 +151,8 @@ def main(args):
     np.random.seed(seed)
     cudnn.benchmark = True
 
-    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+    calib_is_train = not args.calib_use_val
+    dataset_train, args.nb_classes = build_dataset(is_train=calib_is_train, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
     if args.distributed:
