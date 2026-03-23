@@ -47,7 +47,7 @@ class Q_Linear(nn.Linear):
         self.per_channel = False
         self.s = Parameter(torch.Tensor(1))
         self.num = 100
-        self.eps = torch.tensor(1e-8)
+        self.register_buffer("eps", torch.tensor(1e-8))
         self.smoothing = False
         self.real_int8 = False
         self.qbit = 4
@@ -171,8 +171,10 @@ class Q_Linear(nn.Linear):
         else:
             try:
                 weight = self._weight_quant()
-            except:
-                breakpoint()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Weight quantization failed: weight shape={tuple(self.weight.shape)}"
+                ) from e
             return F.linear(x, weight, self.bias)
 
 class Q_Act(nn.Module):
@@ -185,7 +187,8 @@ class Q_Act(nn.Module):
         self.per_channel = False
         self.s = Parameter(torch.Tensor(1))
         self.num = 100
-        self.eps = torch.tensor(1e-8)
+        self.register_buffer("eps", torch.tensor(1e-8))
+        self.per_token = False
         self.smoothing = False
         self.real_int8 = False
         

@@ -241,7 +241,6 @@ def JLSS(
             layers[i] = qlayer.to("cpu")
 
         else:
-            register_scales_and_zeros(qlayer)
             layers[i] = qlayer.to("cpu")
 
         del layer

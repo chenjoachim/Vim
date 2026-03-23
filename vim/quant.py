@@ -127,7 +127,7 @@ def get_args_parser():
     parser.add_argument("--n-lvw", type=int, default=256)
     parser.add_argument("--n-lva", type=int, default=256)
     parser.add_argument("--qmode", type=str, default='ptq4vm', choices=['ptq4vm'])
-    parser.add_argument('--train-batch', default=256, type=int)
+    parser.add_argument('--train-batch', default=16, type=int)
     
     parser.add_argument('--lr-a', type=float, default=5e-4, metavar='LR',
                         help='activation stepsize lr (default: 5e-4)')
@@ -247,9 +247,9 @@ def main(args):
         JLSS(model_without_ddp, args, data_loader_train, device, act_scales)
 
         for name, module in model_without_ddp.named_modules():
-                if isinstance(module, Q.Linear):
-                    module.set_real_int8()
-                    module.act_func.set_real_int8()
+            if isinstance(module, Q.Linear):
+                module.set_real_int8()
+                module.act_func.set_real_int8()
         
         time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
 
