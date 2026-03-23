@@ -154,9 +154,10 @@ def JLSS(
     
     
     verbose = getattr(args, 'verbose', False)
+    disable_tqdm = getattr(args, "rank", 0) != 0
     layer_iter = range(len(layers))
     if not verbose:
-        layer_iter = tqdm(layer_iter, desc="Quantizing layers")
+        layer_iter = tqdm(layer_iter, desc="Quantizing layers", disable=disable_tqdm)
     for i in layer_iter:
         if verbose:
             print(f"=== Start quantize layer {i} ===")
@@ -213,7 +214,7 @@ def JLSS(
 
             epoch_iter = range(args.epochs)
             if not verbose:
-                epoch_iter = tqdm(epoch_iter, desc=f"  Layer {i} JLSS", leave=False)
+                epoch_iter = tqdm(epoch_iter, desc=f"  Layer {i} JLSS", leave=False, disable=disable_tqdm)
             for epochs in epoch_iter:
                 loss_list = []
                 norm_list = []

@@ -307,22 +307,23 @@ def main(args):
         print(msg)
 
         # Restore non-tensor quantization state from saved args
-        saved_args = quant_checkpoint.get('args', {})
-        n_lvw = saved_args.get('n_lvw', 256)
-        n_lva = saved_args.get('n_lva', 256)
-        for name, module in model_without_ddp.named_modules():
-            if isinstance(module, Q.Linear):
-                module.n_lv = n_lvw
-                module.qmax = n_lvw // 2 - 1
-                module.qmin = -(n_lvw // 2 - 1)
-                module.per_channel = module.s.dim() > 1
-                module.smoothing = True
-            if isinstance(module, Q.Act):
-                module.n_lv = n_lva
-                module.qmax = n_lva - 1
-                module.qmin = 0
-                module.per_token = module.s.dim() > 1
-                module.smoothing = True
+        if Q is not None:
+            saved_args = quant_checkpoint.get('args', {})
+            n_lvw = saved_args.get('n_lvw', 256)
+            n_lva = saved_args.get('n_lva', 256)
+            for name, module in model_without_ddp.named_modules():
+                if isinstance(module, Q.Linear):
+                    module.n_lv = n_lvw
+                    module.qmax = n_lvw // 2 - 1
+                    module.qmin = -(n_lvw // 2 - 1)
+                    module.per_channel = module.s.dim() > 1
+                    module.smoothing = True
+                if isinstance(module, Q.Act):
+                    module.n_lv = n_lva
+                    module.qmax = n_lva - 1
+                    module.qmin = 0
+                    module.per_token = module.s.dim() > 1
+                    module.smoothing = True
 
         model_without_ddp.to(device)
 
@@ -361,7 +362,7 @@ def main(args):
             from ptq4vm.jlss import JLSS
             JLSS(model_without_ddp, args, data_loader_train, device, act_scales)
 
-            if args.save_quant:
+            if args.save_quant and utils.is_main_process():
                 save_dict = {
                     'model': model_without_ddp.state_dict(),
                     'args': vars(args),

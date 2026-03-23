@@ -117,7 +117,7 @@ def evaluate(data_loader, model, device, amp_autocast, verbose=False):
     if verbose:
         iterable = metric_logger.log_every(data_loader, 10, header)
     else:
-        iterable = tqdm(data_loader, desc="Evaluating")
+        iterable = tqdm(data_loader, desc="Evaluating", disable=not utils.is_main_process())
 
     for images, target in iterable:
         images = images.to(device, non_blocking=True)
