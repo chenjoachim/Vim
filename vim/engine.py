@@ -105,7 +105,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, amp_autocast):
+def evaluate(data_loader, model, device, amp_autocast, verbose=False):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -114,7 +114,12 @@ def evaluate(data_loader, model, device, amp_autocast):
     # switch to evaluation mode
     model.eval()
 
-    for images, target in metric_logger.log_every(data_loader, 10, header):
+    if verbose:
+        iterable = metric_logger.log_every(data_loader, 10, header)
+    else:
+        iterable = tqdm(data_loader, desc="Evaluating", disable=not utils.is_main_process())
+
+    for images, target in iterable:
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
@@ -129,6 +134,11 @@ def evaluate(data_loader, model, device, amp_autocast):
         metric_logger.update(loss=loss.item())
         metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+        if not verbose:
+            iterable.set_postfix(
+                acc1=f"{metric_logger.meters['acc1'].global_avg:.1f}",
+                acc5=f"{metric_logger.meters['acc5'].global_avg:.1f}",
+                loss=f"{metric_logger.meters['loss'].global_avg:.3f}")
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
