@@ -7,6 +7,7 @@ import os
 import pdb
 import gc
 
+from tqdm import tqdm
 from ptq4vm.utils import NativeScalerWithGradNormCount
 from ptq4vm.quantizer import QuantOps as Q
 import torch.nn.functional as F
@@ -57,7 +58,7 @@ def JLSS(
     dev,
     act_scales,
 ):
-    print("Starting ...")
+    print("Starting JLSS optimization...")
     
     for n, m in model.named_parameters():
         m.requires_grad=False
@@ -152,8 +153,13 @@ def JLSS(
     }        
     
     
-    for i in range(len(layers)):
-        print(f"=== Start quantize layer {i} ===")
+    verbose = getattr(args, 'verbose', False)
+    layer_iter = range(len(layers))
+    if not verbose:
+        layer_iter = tqdm(layer_iter, desc="Quantizing layers")
+    for i in layer_iter:
+        if verbose:
+            print(f"=== Start quantize layer {i} ===")
         layer = layers[i].to(dev)
         qlayer = copy.deepcopy(layer)   
         qlayer = qlayer.to(dev)
@@ -178,7 +184,12 @@ def JLSS(
                             scale = (act.pow(args.alpha)/weight.pow(1-args.alpha)).clamp(min=1e-5)
                             module.act_func.register_parameter("smooth_scale",torch.nn.Parameter(scale))
 
-        Q.initialize(qlayer, fp_inps_0, fp_residual_0, args.n_lvw, args.n_lva, act=False, weight=True, per_channel=True, per_token=True, trunc=True)
+        if verbose:
+            Q.initialize(qlayer, fp_inps_0, fp_residual_0, args.n_lvw, args.n_lva, act=False, weight=True, per_channel=True, per_token=True, trunc=True)
+        else:
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()):
+                Q.initialize(qlayer, fp_inps_0, fp_residual_0, args.n_lvw, args.n_lva, act=False, weight=True, per_channel=True, per_token=True, trunc=True)
 
 
         
@@ -200,14 +211,17 @@ def JLSS(
 
             loss_scaler = NativeScalerWithGradNormCount()
 
-            for epochs in range(args.epochs):
+            epoch_iter = range(args.epochs)
+            if not verbose:
+                epoch_iter = tqdm(epoch_iter, desc=f"  Layer {i} JLSS", leave=False)
+            for epochs in epoch_iter:
                 loss_list = []
                 norm_list = []
-                for j in range(args.batch_size//int(args.train_batch)):    
+                for j in range(args.batch_size//int(args.train_batch)):
                     index = j * int(args.train_batch)
                     if i==0:
                         quant_out, _ = qlayer(quant_inps[index:index+int(args.train_batch),], None)
-                    else:                              
+                    else:
                         quant_out, _ = qlayer(quant_inps[index:index+int(args.train_batch),], quant_residual[index:index+int(args.train_batch),])
 
                     loss = (1 - F.cosine_similarity(fp_inps[index:index+int(args.train_batch),].float(), quant_out.float(), dim=-1)).mean() # Cosine Similarity
@@ -219,11 +233,14 @@ def JLSS(
                     optimizer.zero_grad()
                     norm = loss_scaler(loss, optimizer,clip_grad=2.0, parameters= get_parameters_all(qlayer)).cpu()
                     norm_list.append(norm.data)
-                
+
                 loss_mean = torch.stack(loss_list).mean()
                 norm_mean = torch.stack(norm_list).mean()
-                if epochs % 50 == 0 or epochs == args.epochs-1:
-                    print(f"layer {i} iter {epochs} loss:{loss_mean} norm:{norm_mean} max memory_allocated {torch.cuda.max_memory_allocated(dev) / 1024**2} ")
+                if verbose:
+                    if epochs % 50 == 0 or epochs == args.epochs-1:
+                        print(f"layer {i} iter {epochs} loss:{loss_mean} norm:{norm_mean} max memory_allocated {torch.cuda.max_memory_allocated(dev) / 1024**2} ")
+                else:
+                    epoch_iter.set_postfix(loss=f"{loss_mean:.4f}", norm=f"{norm_mean:.4f}")
 
             del optimizer
 

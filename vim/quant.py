@@ -141,6 +141,9 @@ def get_args_parser():
     parser.add_argument('--load-quant', default='', type=str,
                         help='path to load a previously saved quantized checkpoint (skips JLSS)')
 
+    parser.add_argument('--verbose', action='store_true',
+                        help='use verbose logging instead of tqdm progress bars')
+
     return parser
 
 
@@ -280,11 +283,30 @@ def main(args):
             module.name = name
 
         quant_checkpoint = torch.load(args.load_quant, map_location='cpu')
-        msg = model_without_ddp.load_state_dict(quant_checkpoint['model'], strict=False)
+        # Resize default-initialized params (e.g. .s) to match checkpoint shapes
+        # before load_state_dict, since Q_Linear/Q_Act init .s as shape [1]
+        # but after JLSS they become per-channel/per-token
+        ckpt_state = quant_checkpoint['model']
+        model_state = model_without_ddp.state_dict()
+        for key in ckpt_state:
+            if key in model_state and ckpt_state[key].shape != model_state[key].shape:
+                # Find the module and replace the parameter with correct shape
+                parts = key.rsplit('.', 1)
+                if len(parts) == 2:
+                    mod = model_without_ddp
+                    for attr in parts[0].split('.'):
+                        mod = mod[int(attr)] if attr.isdigit() else getattr(mod, attr)
+                    param_name = parts[1]
+                    if isinstance(getattr(mod, param_name), nn.Parameter):
+                        delattr(mod, param_name)
+                        mod.register_parameter(param_name, nn.Parameter(torch.empty_like(ckpt_state[key])))
+                    else:
+                        mod.register_buffer(param_name, torch.empty_like(ckpt_state[key]))
+        msg = model_without_ddp.load_state_dict(ckpt_state, strict=False)
         print(f"Loaded quantized checkpoint from {args.load_quant}")
         print(msg)
 
-        test_stats = evaluate(data_loader_val, model, device, amp_autocast)
+        test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
@@ -327,7 +349,7 @@ def main(args):
                 torch.save(save_dict, args.save_quant)
                 print(f"Saved quantized checkpoint to {args.save_quant}")
 
-        test_stats = evaluate(data_loader_val, model, device, amp_autocast)
+        test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
 
         return
