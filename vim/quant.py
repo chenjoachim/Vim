@@ -306,6 +306,26 @@ def main(args):
         print(f"Loaded quantized checkpoint from {args.load_quant}")
         print(msg)
 
+        # Restore non-tensor quantization state from saved args
+        saved_args = quant_checkpoint.get('args', {})
+        n_lvw = saved_args.get('n_lvw', 256)
+        n_lva = saved_args.get('n_lva', 256)
+        for name, module in model_without_ddp.named_modules():
+            if isinstance(module, Q.Linear):
+                module.n_lv = n_lvw
+                module.qmax = n_lvw // 2 - 1
+                module.qmin = -(n_lvw // 2 - 1)
+                module.per_channel = module.s.dim() > 1
+                module.smoothing = True
+            if isinstance(module, Q.Act):
+                module.n_lv = n_lva
+                module.qmax = n_lva - 1
+                module.qmin = 0
+                module.per_token = module.s.dim() > 1
+                module.smoothing = True
+
+        model_without_ddp.to(device)
+
         test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return

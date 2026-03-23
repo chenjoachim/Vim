@@ -42,7 +42,7 @@ class Q_Linear(nn.Linear):
         super(Q_Linear, self).__init__(*args, **kargs)
         self.act_func = act_func
         self.n_lv = 0
-        self.qmax = self.n_lv // 2 - 1 
+        self.qmax = self.n_lv // 2 - 1
         self.qmin = -self.qmax
         self.per_channel = False
         self.s = Parameter(torch.Tensor(1))
@@ -189,6 +189,8 @@ class Q_Act(nn.Module):
         self.num = 100
         self.register_buffer("eps", torch.tensor(1e-8))
         self.per_token = False
+        self.smooth_scale = Parameter(torch.ones(1))
+        self.register_buffer("z", torch.tensor(0.0))
         self.smoothing = False
         self.real_int8 = False
         
