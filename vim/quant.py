@@ -135,7 +135,12 @@ def get_args_parser():
                         help='weight stepsize lr (default: 5e-4)')
     parser.add_argument('--lr-s', type=float, default=1e-2, metavar='LR',
                         help='learning rate (default: 1e-2)')
-    
+
+    parser.add_argument('--save-quant', default='', type=str,
+                        help='path to save quantized checkpoint after JLSS optimization')
+    parser.add_argument('--load-quant', default='', type=str,
+                        help='path to load a previously saved quantized checkpoint (skips JLSS)')
+
     return parser
 
 
@@ -253,36 +258,74 @@ def main(args):
         
         time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
 
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        msg = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-        print(msg)
-        
-        if args.qmode == "ptq4vm":    
+    if args.load_quant:
+        # Load a previously saved quantized checkpoint (skip JLSS)
+        if args.qmode == "ptq4vm":
             from ptq4vm.quantizer import QuantOps as Q
         else:
             Q = None
-        
+
+        # Build quantized architecture before loading state_dict
         if Q is not None:
             for name, module in model_without_ddp.named_modules():
                 if isinstance(module, nn.Linear):
                     if 'out_proj' in name or 'in_proj' in name or 'x_proj' in name or 'dt_proj' in name:
-                        quantlinear = Q.Linear(module.in_features, module.out_features, 
-                                            act_func=Q.Act(), bias=False if module.bias is None else True, 
+                        quantlinear = Q.Linear(module.in_features, module.out_features,
+                                            act_func=Q.Act(), bias=False if module.bias is None else True,
+                                            device=module.weight.device)
+                        add_new_module(name, model_without_ddp, quantlinear)
+                        del quantlinear
+
+        for name, module in model_without_ddp.named_modules():
+            module.name = name
+
+        quant_checkpoint = torch.load(args.load_quant, map_location='cpu')
+        msg = model_without_ddp.load_state_dict(quant_checkpoint['model'], strict=False)
+        print(f"Loaded quantized checkpoint from {args.load_quant}")
+        print(msg)
+
+        test_stats = evaluate(data_loader_val, model, device, amp_autocast)
+        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        return
+
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        msg = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+        print(msg)
+
+        if args.qmode == "ptq4vm":
+            from ptq4vm.quantizer import QuantOps as Q
+        else:
+            Q = None
+
+        if Q is not None:
+            for name, module in model_without_ddp.named_modules():
+                if isinstance(module, nn.Linear):
+                    if 'out_proj' in name or 'in_proj' in name or 'x_proj' in name or 'dt_proj' in name:
+                        quantlinear = Q.Linear(module.in_features, module.out_features,
+                                            act_func=Q.Act(), bias=False if module.bias is None else True,
                                             device=module.weight.device)
                         quantlinear.weight.data = module.weight
                         if module.bias is not None:
                             quantlinear.bias.data = module.bias
                         add_new_module(name, model_without_ddp, quantlinear)
                         del quantlinear
-                        
+
         for name, module in model_without_ddp.named_modules():
-            module.name = name  
-              
+            module.name = name
+
         if args.qmode == "ptq4vm" and args.act_scales:
             act_scales = torch.load(args.act_scales)
             from ptq4vm.jlss import JLSS
             JLSS(model_without_ddp, args, data_loader_train, device, act_scales)
+
+            if args.save_quant:
+                save_dict = {
+                    'model': model_without_ddp.state_dict(),
+                    'args': vars(args),
+                }
+                torch.save(save_dict, args.save_quant)
+                print(f"Saved quantized checkpoint to {args.save_quant}")
 
         test_stats = evaluate(data_loader_val, model, device, amp_autocast)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
