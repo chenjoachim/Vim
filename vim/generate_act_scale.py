@@ -159,7 +159,7 @@ def main(args):
     # log about
 
     calib_is_train = not args.calib_use_val
-    dataset_train, args.nb_classes = build_dataset(is_train=calib_is_train, args=args)
+    dataset_train, args.nb_classes = build_dataset(is_train=calib_is_train, args=args, transform_as_train=True)
     
     if args.distributed:
         num_tasks = utils.get_world_size()

@@ -78,8 +78,8 @@ class ImagenetteDataset(ImageFolder):
         self.targets = [remap[t] for t in self.targets]
 
 
-def build_dataset(is_train, args):
-    transform = build_transform(is_train, args)
+def build_dataset(is_train, args, transform_as_train=None):
+    transform = build_transform(is_train if transform_as_train is None else transform_as_train, args)
 
     if args.data_set == 'CIFAR':
         dataset = datasets.CIFAR100(args.data_path, train=is_train, transform=transform)

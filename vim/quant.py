@@ -160,7 +160,7 @@ def main(args):
     cudnn.benchmark = True
 
     calib_is_train = not args.calib_use_val
-    dataset_train, args.nb_classes = build_dataset(is_train=calib_is_train, args=args)
+    dataset_train, args.nb_classes = build_dataset(is_train=calib_is_train, args=args, transform_as_train=True)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
     if args.distributed:

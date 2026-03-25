@@ -133,7 +133,7 @@ class Block(nn.Module):
                     eps=self.norm.eps,
                 )    
         hidden_states = self.mixer(hidden_states, inference_params=inference_params)
-        return hidden_states, residual
+        return hidden_states, residual.clone()
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
