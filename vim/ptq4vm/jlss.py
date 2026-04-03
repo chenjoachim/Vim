@@ -180,8 +180,8 @@ def JLSS(
                 if module.act_func is not None:
                     for key in pairs.keys():
                         if key in name:
-                            act = act_scales[f"{layer_name_prefix}.{i}.{name}"].to(device=dev, dtype=module.weight.dtype).clamp(min=1e-3)
-                            weight = module.weight.abs().max(dim=0)[0].clamp(min=1e-5)
+                            act = act_scales[f"{layer_name_prefix}.{i}.{name}"].to(device=dev).float().clamp(min=1e-3)
+                            weight = module.weight.float().abs().max(dim=0)[0].clamp(min=1e-5)
                             scale = (act.pow(args.alpha)/weight.pow(1-args.alpha)).clamp(min=1e-5)
                             module.act_func.register_parameter("smooth_scale",torch.nn.Parameter(scale))
 
