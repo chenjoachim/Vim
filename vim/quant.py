@@ -141,6 +141,9 @@ def get_args_parser():
     parser.add_argument('--load-quant', default='', type=str,
                         help='path to load a previously saved quantized checkpoint (skips JLSS)')
 
+    parser.add_argument('--real-gemm', action='store_true',
+                        help='enable real INT GEMM kernel and measure latency')
+
     parser.add_argument('--verbose', action='store_true',
                         help='use verbose logging instead of tqdm progress bars')
 
@@ -327,8 +330,15 @@ def main(args):
 
         model_without_ddp.to(device)
 
-        test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        if args.real_gemm and Q is not None:
+            for name, module in model_without_ddp.named_modules():
+                if isinstance(module, Q.Linear):
+                    module.set_real_int8()
+                    module.act_func.set_real_int8()
+            time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
+        else:
+            test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
+            print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
     if args.resume:
@@ -370,8 +380,11 @@ def main(args):
                 torch.save(save_dict, args.save_quant)
                 print(f"Saved quantized checkpoint to {args.save_quant}")
 
-        test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        if args.real_gemm:
+            time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
+        else:
+            test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
+            print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
 
         return
     

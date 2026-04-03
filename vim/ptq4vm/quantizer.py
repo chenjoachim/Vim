@@ -68,10 +68,10 @@ class Q_Linear(nn.Linear):
     def set_real_int8(self):
         self.real_int8 = True
         if self.n_lv == 256:
-            self.int_weight = torch.tensor(self.weight.to(torch.int8))
+            self.int_weight = self.weight.to(torch.int8).detach()
             self.qbit = 8
         elif self.n_lv == 16:
-            self.int_weight = torch.tensor(self.weight.to(torch.int8))[:, :self.weight.shape[1]//2]
+            self.int_weight = self.weight.to(torch.int8).detach()[:, :self.weight.shape[1]//2]
             self.qbit = 4
 
     def initialize(self, n_lv, per_channel=False, trunc=False):
@@ -153,12 +153,31 @@ class Q_Linear(nn.Linear):
             x = self.act_func(x)
         
         if self.real_int8:
+            import sys, os
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'cuda_measure'))
             import vim_GEMM
+            scale_x = self.act_func.s.squeeze().unsqueeze(-1).contiguous()  # (m, 1)
+            smooth_scale = self.act_func.smooth_scale
+            align = 32 if self.qbit == 4 else 16
+            k = x.shape[-1]
+            pad = (align - k % align) % align
+            if pad > 0:
+                x = F.pad(x, (0, pad))
+                if self.qbit == 4:
+                    w = F.pad(self.int_weight.float(), (0, pad // 2)).to(torch.int8)
+                    smooth_scale = F.pad(smooth_scale, (0, pad // 2))
+                else:
+                    w = F.pad(self.int_weight.float(), (0, pad)).to(torch.int8)
+                    smooth_scale = F.pad(smooth_scale, (0, pad))
+            else:
+                w = self.int_weight
+            if self.qbit == 4:
+                smooth_scale = smooth_scale[:smooth_scale.shape[0]//2]
             result = vim_GEMM.vim_GEMM(x.contiguous(), \
-                    self.int_weight.contiguous(), \
-                    self.act_func.smooth_scale, \
-                    self.act_func.s, \
-                    self.s, \
+                    w.contiguous(), \
+                    smooth_scale.contiguous(), \
+                    scale_x, \
+                    self.s.contiguous(), \
                     16, \
                     self.qbit)
             return result
