@@ -12,12 +12,17 @@
 export MASTER_ADDR=localhost
 export MASTER_PORT=29500
 
+export TINY_MODEL_PATH=checkpoints/vim_t_midclstok_76p1acc.pth
+export SMALL_MODEL_PATH=checkpoints/vim_s_midclstok_ft_81p6acc.pth
+export TINY_MODEL_CONFIG=vim_tiny_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_midclstok_div2
+export SMALL_MODEL_CONFIG=vim_small_patch16_stride8_224_bimambav2_final_pool_mean_abs_pos_embed_with_midclstok_div2
+
 source .venv/bin/activate
 export LD_LIBRARY_PATH=$(python -c "import torch; import os; print(os.path.dirname(torch.__file__))")/lib:$LD_LIBRARY_PATH
 
 python vim/quant.py \
-  --model vim_tiny_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_midclstok_div2 \
-  --resume checkpoints/vim_t_midclstok_76p1acc.pth \
+  --model $SMALL_MODEL_CONFIG \
+  --resume $SMALL_MODEL_PATH \
   --data-path data/imagenet \
   --data-set IMNET \
   --batch-size 256 \
