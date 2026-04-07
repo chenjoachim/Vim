@@ -154,11 +154,19 @@ def time_measure(data_loader, model, amp_autocast, test_turn):
     C, H, W = data_loader.dataset[0][0].shape
     sample_image = torch.randn(B,C,H,W).to('cuda')
 
+    # warmup
+    for _ in range(10):
+        with amp_autocast():
+            model(sample_image)
+    torch.cuda.synchronize()
+
     time_per_batch = []
     for i in tqdm(range(test_turn)):
         with amp_autocast():
+            torch.cuda.synchronize()
             start = time.time()
             output = model(sample_image)
+            torch.cuda.synchronize()
             time_per_batch.append(time.time() - start)
     print(f"{statistics.median(time_per_batch):.8f} sec")
     return statistics.median(time_per_batch)

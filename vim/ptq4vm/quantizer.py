@@ -67,12 +67,20 @@ class Q_Linear(nn.Linear):
 
     def set_real_int8(self):
         self.real_int8 = True
-        if self.n_lv == 256:
-            self.int_weight = self.weight.to(torch.int8).detach()
-            self.qbit = 8
-        elif self.n_lv == 16:
-            self.int_weight = self.weight.to(torch.int8).detach()[:, :self.weight.shape[1]//2]
-            self.qbit = 4
+        with torch.no_grad():
+            weight = self.weight * self.act_func.smooth_scale
+            if self.n_lv == 256:
+                qmax = self.n_lv // 2 - 1  # 127
+                weight = F.hardtanh(weight / self.s, -qmax, qmax)
+                self.int_weight = torch.round(weight).to(torch.int8).detach()
+                self.w_col_sum = self.int_weight.float().sum(dim=1)  # (n,)
+                self.qbit = 8
+            elif self.n_lv == 16:
+                qmax = self.n_lv // 2 - 1  # 7
+                weight = F.hardtanh(weight / self.s, -qmax, qmax)
+                self.int_weight = torch.round(weight).to(torch.int8).detach()[:, :self.weight.shape[1]//2]
+                self.w_col_sum = self.int_weight.float().sum(dim=1)  # (n,)
+                self.qbit = 4
 
     def initialize(self, n_lv, per_channel=False, trunc=False):
         x = self.weight * self.act_func.smooth_scale
@@ -156,13 +164,19 @@ class Q_Linear(nn.Linear):
             import sys, os
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'cuda_measure'))
             import vim_GEMM
-            scale_x = self.act_func.s.squeeze().unsqueeze(-1).contiguous()  # (m, 1)
+            scale_x = self.act_func.s.squeeze().unsqueeze(-1).contiguous()  # (seq_len, 1) or (1, 1)
+            z = self.act_func.z.squeeze().unsqueeze(-1).contiguous()  # same shape as scale_x
+            if scale_x.numel() > 1:  # per-token: kernel indexes over batch*seq_len rows
+                scale_x = scale_x.repeat(x.shape[0], 1).contiguous()  # (batch*seq_len, 1)
+                z = z.repeat(x.shape[0], 1).contiguous()
+            z = z.to(x.dtype)
             smooth_scale = self.act_func.smooth_scale
+            w_col_sum = self.w_col_sum.to(x.dtype).contiguous()
             align = 32 if self.qbit == 4 else 16
             k = x.shape[-1]
             pad = (align - k % align) % align
             if pad > 0:
-                x = F.pad(x, (0, pad))
+                x = F.pad(x.contiguous(), (0, pad))
                 if self.qbit == 4:
                     w = F.pad(self.int_weight.float(), (0, pad // 2)).to(torch.int8)
                     smooth_scale = F.pad(smooth_scale, (0, pad // 2))
@@ -173,13 +187,20 @@ class Q_Linear(nn.Linear):
                 w = self.int_weight
             if self.qbit == 4:
                 smooth_scale = smooth_scale[:smooth_scale.shape[0]//2]
+
             result = vim_GEMM.vim_GEMM(x.contiguous(), \
                     w.contiguous(), \
                     smooth_scale.contiguous(), \
                     scale_x, \
                     self.s.contiguous(), \
+                    z.contiguous(), \
+                    w_col_sum, \
                     16, \
                     self.qbit)
+
+            if self.bias is not None:
+                result = result + self.bias
+
             return result
         elif self.n_lv == 0:    
             if self.smoothing:
@@ -246,14 +267,14 @@ class Q_Act(nn.Module):
                 min_val = x.min(dim=1, keepdim=True)[0]
                 val = (max_val - min_val) / self.qmax
                 self.register_parameter("s",torch.nn.Parameter(val.unsqueeze(0)))
-                self.z = torch.round(-min_val.unsqueeze(0) / self.s)
-                
+                self.register_buffer("z", torch.round(-min_val.unsqueeze(0) / self.s))
+
             else:
                 max_val = x.max()
                 min_val = x.min()
                 val = (max_val - min_val) / self.qmax
                 self.s.data = torch.tensor(val)
-                self.z = torch.round(-min_val / self.s)
+                self.register_buffer("z", torch.round(-min_val / self.s))
         else:
             if self.per_token:
                 b,l,d = x.shape
@@ -306,10 +327,10 @@ class Q_Act(nn.Module):
                 del self.s
                 val = torch.max((max_val_pos - min_val_neg) / (self.qmax - self.qmin), self.eps).unsqueeze(1).unsqueeze(0)
                 self.register_parameter("s",torch.nn.Parameter(val))
-                self.z = torch.clamp(self.qmin - torch.round(min_val_neg.unsqueeze(1).unsqueeze(0) / self.s), self.qmin, self.qmax)
+                self.register_buffer("z", torch.clamp(self.qmin - torch.round(min_val_neg.unsqueeze(1).unsqueeze(0) / self.s), self.qmin, self.qmax))
             else:
                 self.s.data = torch.max((max_val_pos - min_val_neg) / (self.qmax - self.qmin), self.eps)
-                self.z = torch.clamp(self.qmin - torch.round(min_val_neg / self.s), self.qmin, self.qmax)
+                self.register_buffer("z", torch.clamp(self.qmin - torch.round(min_val_neg / self.s), self.qmin, self.qmax))
         self.smoothing = True
         print("Q_Act Max s :" +  str(self.s.max())) 
 

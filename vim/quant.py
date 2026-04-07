@@ -335,6 +335,8 @@ def main(args):
                 if isinstance(module, Q.Linear):
                     module.set_real_int8()
                     module.act_func.set_real_int8()
+            test_stats = evaluate(data_loader_val, model_without_ddp, device, amp_autocast, verbose=args.verbose)
+            print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
             time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
         else:
             test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
