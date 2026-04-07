@@ -98,6 +98,7 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--time_compare', action='store_true', help='comparing time Kernel vs FP')
+    parser.add_argument('--profile', action='store_true', help='profile GPU time breakdown')
     parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
     parser.add_argument('--eval-crop-ratio', default=0.875, type=float, help="Crop ratio for evaluation")
     parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
@@ -143,6 +144,8 @@ def get_args_parser():
 
     parser.add_argument('--real-gemm', action='store_true',
                         help='enable real INT GEMM kernel and measure latency')
+    parser.add_argument('--symmetric-act', action='store_true',
+                        help='use symmetric activation quantization (ablation)')
 
     parser.add_argument('--verbose', action='store_true',
                         help='use verbose logging instead of tqdm progress bars')
@@ -242,7 +245,7 @@ def main(args):
                 if isinstance(module, nn.Linear):
                     if 'out_proj' in name or 'in_proj' in name or 'x_proj' in name or 'dt_proj' in name:
                         quantlinear = Q.Linear(module.in_features, module.out_features, 
-                                            act_func=Q.Act(), bias=False if module.bias is None else True, 
+                                            act_func=Q.Act(symmetric=args.symmetric_act), bias=False if module.bias is None else True,
                                             device=module.weight.device)
                         quantlinear.weight.data = module.weight
                         if module.bias is not None:
@@ -323,8 +326,13 @@ def main(args):
                     module.smoothing = True
                 if isinstance(module, Q.Act):
                     module.n_lv = n_lva
-                    module.qmax = n_lva - 1
-                    module.qmin = 0
+                    module.symmetric = saved_args.get('symmetric_act', False)
+                    if module.symmetric:
+                        module.qmax = n_lva // 2 - 1
+                        module.qmin = -(n_lva // 2 - 1)
+                    else:
+                        module.qmax = n_lva - 1
+                        module.qmin = 0
                     module.per_token = module.s.dim() > 1
                     module.smoothing = True
 
@@ -338,9 +346,39 @@ def main(args):
             test_stats = evaluate(data_loader_val, model_without_ddp, device, amp_autocast, verbose=args.verbose)
             print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
             time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
+            if args.profile:
+                from torch.profiler import profile, ProfilerActivity
+                B = data_loader_val.batch_size
+                C, H, W = data_loader_val.dataset[0][0].shape
+                sample = torch.randn(B, C, H, W).to(device)
+                for _ in range(5):
+                    with amp_autocast():
+                        model_without_ddp(sample)
+                torch.cuda.synchronize()
+                with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+                    with amp_autocast():
+                        model_without_ddp(sample)
+                    torch.cuda.synchronize()
+                print("\n=== QUANTIZED MODEL GPU PROFILE ===")
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
         else:
             test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
             print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+            if args.profile:
+                from torch.profiler import profile, ProfilerActivity
+                B = data_loader_val.batch_size
+                C, H, W = data_loader_val.dataset[0][0].shape
+                sample = torch.randn(B, C, H, W).to(device)
+                for _ in range(5):
+                    with amp_autocast():
+                        model(sample)
+                torch.cuda.synchronize()
+                with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+                    with amp_autocast():
+                        model(sample)
+                    torch.cuda.synchronize()
+                print("\n=== FP16 MODEL GPU PROFILE ===")
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
         return
 
     if args.resume:
@@ -382,11 +420,32 @@ def main(args):
                 torch.save(save_dict, args.save_quant)
                 print(f"Saved quantized checkpoint to {args.save_quant}")
 
+            del act_scales, checkpoint
+            import gc; gc.collect()
+            torch.cuda.empty_cache()
+
         if args.real_gemm:
             time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
         else:
             test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
             print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+
+        if args.profile:
+            from torch.profiler import profile, ProfilerActivity
+            B = data_loader_val.batch_size
+            C, H, W = data_loader_val.dataset[0][0].shape
+            sample = torch.randn(B, C, H, W).to(device)
+            m = model_without_ddp if args.real_gemm else model
+            for _ in range(5):
+                with amp_autocast():
+                    m(sample)
+            torch.cuda.synchronize()
+            with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+                with amp_autocast():
+                    m(sample)
+                torch.cuda.synchronize()
+            print("\n=== GPU PROFILE ===")
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
 
         return
     

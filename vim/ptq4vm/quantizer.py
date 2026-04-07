@@ -78,8 +78,13 @@ class Q_Linear(nn.Linear):
             elif self.n_lv == 16:
                 qmax = self.n_lv // 2 - 1  # 7
                 weight = F.hardtanh(weight / self.s, -qmax, qmax)
-                self.int_weight = torch.round(weight).to(torch.int8).detach()[:, :self.weight.shape[1]//2]
-                self.w_col_sum = self.int_weight.float().sum(dim=1)  # (n,)
+                int_weight = torch.round(weight).to(torch.int8).detach()
+                self.w_col_sum = int_weight.float().sum(dim=1)  # (n,) - computed before packing
+                # Pack two int4 values into one byte: low nibble = w[2i], high nibble = w[2i+1]
+                n_rows, k = int_weight.shape
+                assert k % 2 == 0, f"k={k} must be even for int4 packing"
+                w_flat = (int_weight.view(n_rows, k // 2, 2).to(torch.uint8) & 0x0F)
+                self.int_weight = (w_flat[:, :, 0] | (w_flat[:, :, 1] << 4)).detach()  # (n, k/2) uint8
                 self.qbit = 4
 
     def initialize(self, n_lv, per_channel=False, trunc=False):
@@ -172,21 +177,37 @@ class Q_Linear(nn.Linear):
             z = z.to(x.dtype)
             smooth_scale = self.act_func.smooth_scale
             w_col_sum = self.w_col_sum.to(x.dtype).contiguous()
-            align = 32 if self.qbit == 4 else 16
             k = x.shape[-1]
-            pad = (align - k % align) % align
-            if pad > 0:
-                x = F.pad(x.contiguous(), (0, pad))
-                if self.qbit == 4:
-                    w = F.pad(self.int_weight.float(), (0, pad // 2)).to(torch.int8)
-                    smooth_scale = F.pad(smooth_scale, (0, pad // 2))
+            if self.qbit == 4:
+                # int4: k must be even (for packing) and meet alignment
+                align = 32  # CUTLASS int4 typically needs k divisible by 32
+                pad = (align - k % align) % align
+                if pad > 0:
+                    x = F.pad(x.contiguous(), (0, pad))
+                    # Unpack, pad, repack weight for padded k
+                    n_rows = self.int_weight.shape[0]
+                    lo = self.int_weight & 0x0F
+                    hi = (self.int_weight >> 4) & 0x0F
+                    w_unpacked = torch.stack([lo, hi], dim=-1).view(n_rows, -1).to(torch.int8)
+                    w_unpacked = F.pad(w_unpacked.float(), (0, pad)).to(torch.int8)
+                    new_k = k + pad
+                    w_flat = (w_unpacked.view(n_rows, new_k // 2, 2).to(torch.uint8) & 0x0F)
+                    w = (w_flat[:, :, 0] | (w_flat[:, :, 1] << 4))
+                    smooth_scale = F.pad(smooth_scale, (0, pad))
                 else:
+                    w = self.int_weight
+            else:
+                # int8: standard alignment
+                align = 16
+                pad = (align - k % align) % align
+                if pad > 0:
+                    x = F.pad(x.contiguous(), (0, pad))
                     w = F.pad(self.int_weight.float(), (0, pad)).to(torch.int8)
                     smooth_scale = F.pad(smooth_scale, (0, pad))
-            else:
-                w = self.int_weight
-            if self.qbit == 4:
-                smooth_scale = smooth_scale[:smooth_scale.shape[0]//2]
+                else:
+                    w = self.int_weight
+
+            kernel_qbit = self.qbit
 
             result = vim_GEMM.vim_GEMM(x.contiguous(), \
                     w.contiguous(), \
@@ -196,7 +217,7 @@ class Q_Linear(nn.Linear):
                     z.contiguous(), \
                     w_col_sum, \
                     16, \
-                    self.qbit)
+                    kernel_qbit)
 
             if self.bias is not None:
                 result = result + self.bias
@@ -218,12 +239,13 @@ class Q_Linear(nn.Linear):
             return F.linear(x, weight, self.bias)
 
 class Q_Act(nn.Module):
-    def __init__(self):
+    def __init__(self, symmetric=False):
         super(Q_Act, self).__init__()
         # n_lv, qmax, qmin -> refer initialize() function
         self.n_lv = 0
         self.qmax = 0
         self.qmin = 0
+        self.symmetric = symmetric
         self.per_channel = False
         self.s = Parameter(torch.Tensor(1))
         self.num = 100
@@ -252,10 +274,16 @@ class Q_Act(nn.Module):
     def initialize(self, n_lv, tensor, per_token=False, trunc=False):
         x = tensor / self.smooth_scale
         self.n_lv = n_lv
-        self.qmax = n_lv - 1
-        self.qmin = 0
-        self.per_token = per_token     
-        
+        self.per_token = per_token
+
+        if self.symmetric:
+            self.qmax = n_lv // 2 - 1
+            self.qmin = -self.qmax
+            self.register_buffer("z", torch.tensor(0.0))
+        else:
+            self.qmax = n_lv - 1
+            self.qmin = 0
+
         if not trunc:
             if self.per_token:
                 b,l,d = x.shape
@@ -263,18 +291,27 @@ class Q_Act(nn.Module):
                 x = x.reshape(-1, l) # bd, l
                 x = x.permute(1,0) # l, bd
                 del self.s
-                max_val = x.max(dim=1, keepdim=True)[0]
-                min_val = x.min(dim=1, keepdim=True)[0]
-                val = (max_val - min_val) / self.qmax
+                if self.symmetric:
+                    max_val = x.abs().max(dim=1, keepdim=True)[0]
+                    val = max_val / self.qmax
+                else:
+                    max_val = x.max(dim=1, keepdim=True)[0]
+                    min_val = x.min(dim=1, keepdim=True)[0]
+                    val = (max_val - min_val) / self.qmax
                 self.register_parameter("s",torch.nn.Parameter(val.unsqueeze(0)))
-                self.register_buffer("z", torch.round(-min_val.unsqueeze(0) / self.s))
+                if not self.symmetric:
+                    self.register_buffer("z", torch.round(-min_val.unsqueeze(0) / self.s))
 
             else:
-                max_val = x.max()
-                min_val = x.min()
-                val = (max_val - min_val) / self.qmax
-                self.s.data = torch.tensor(val)
-                self.register_buffer("z", torch.round(-min_val / self.s))
+                if self.symmetric:
+                    max_val = x.abs().max()
+                    self.s.data = max_val / self.qmax
+                else:
+                    max_val = x.max()
+                    min_val = x.min()
+                    val = (max_val - min_val) / self.qmax
+                    self.s.data = torch.tensor(val)
+                    self.register_buffer("z", torch.round(-min_val / self.s))
         else:
             if self.per_token:
                 b,l,d = x.shape
