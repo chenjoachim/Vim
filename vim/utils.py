@@ -221,6 +221,10 @@ def init_distributed_mode(args):
     elif 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
         args.gpu = args.rank % torch.cuda.device_count()
+        if args.world_size == 1:
+            print('Single-GPU SLURM job, skipping distributed init')
+            args.distributed = False
+            return
     else:
         print('Not using distributed mode')
         args.distributed = False

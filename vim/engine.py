@@ -176,7 +176,7 @@ def evaluate(data_loader, model, device, amp_autocast, verbose=False):
         # compute output
         with amp_autocast():
             output = model(images)
-            print(f"**Input shape:{images.shape}")
+
             loss = criterion(output, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
