@@ -3,6 +3,7 @@
 """
 Train and eval functions used in main.py
 """
+
 import math
 import sys
 from typing import Iterable, Optional
@@ -13,27 +14,37 @@ import timm
 from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
 
-from losses import DistillationLoss
+from losses import DistillationLoss, DyVMLoss
 import utils
 import statistics
 from tqdm import tqdm
 import time
 
 
-def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
-                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, loss_scaler, amp_autocast, max_norm: float = 0,
-                    model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
-                    set_training_mode=True, args = None):
+def train_one_epoch(
+    model: torch.nn.Module,
+    criterion: DistillationLoss,
+    data_loader: Iterable,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    epoch: int,
+    loss_scaler,
+    amp_autocast,
+    max_norm: float = 0,
+    model_ema: Optional[ModelEma] = None,
+    mixup_fn: Optional[Mixup] = None,
+    set_training_mode=True,
+    args=None,
+):
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    header = 'Epoch: [{}]'.format(epoch)
+    metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
+    header = "Epoch: [{}]".format(epoch)
     print_freq = 10
-    
+
     if args.cosub:
         criterion = torch.nn.BCEWithLogitsLoss()
-        
+
     # debug
     # count = 0
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
@@ -46,24 +57,35 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-            
+
         if args.cosub:
-            samples = torch.cat((samples,samples),dim=0)
-            
+            samples = torch.cat((samples, samples), dim=0)
+
         if args.bce_loss:
             targets = targets.gt(0.0).type(targets.dtype)
-         
+
+        # DyVM loss needs the auxiliary mask / token-feature dict from the model.
+        use_dyvm_loss = isinstance(criterion, DyVMLoss)
+
         with amp_autocast():
-            outputs = model(samples, if_random_cls_token_position=args.if_random_cls_token_position, if_random_token_rank=args.if_random_token_rank)
-            # outputs = model(samples)
+            outputs = model(
+                samples,
+                if_random_cls_token_position=args.if_random_cls_token_position,
+                if_random_token_rank=args.if_random_token_rank,
+                return_aux=use_dyvm_loss,
+            )
             if not args.cosub:
                 loss = criterion(samples, outputs, targets)
             else:
-                outputs = torch.split(outputs, outputs.shape[0]//2, dim=0)
-                loss = 0.25 * criterion(outputs[0], targets) 
-                loss = loss + 0.25 * criterion(outputs[1], targets) 
-                loss = loss + 0.25 * criterion(outputs[0], outputs[1].detach().sigmoid())
-                loss = loss + 0.25 * criterion(outputs[1], outputs[0].detach().sigmoid()) 
+                outputs = torch.split(outputs, outputs.shape[0] // 2, dim=0)
+                loss = 0.25 * criterion(outputs[0], targets)
+                loss = loss + 0.25 * criterion(outputs[1], targets)
+                loss = loss + 0.25 * criterion(
+                    outputs[0], outputs[1].detach().sigmoid()
+                )
+                loss = loss + 0.25 * criterion(
+                    outputs[1], outputs[0].detach().sigmoid()
+                )
 
         if args.if_nan2num:
             with amp_autocast():
@@ -83,14 +105,42 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
         # this attribute is added by timm on one optimizer (adahessian)
         if isinstance(loss_scaler, timm.utils.NativeScaler):
-            is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=is_second_order)
+            is_second_order = (
+                hasattr(optimizer, "is_second_order") and optimizer.is_second_order
+            )
+            loss_scaler(
+                loss,
+                optimizer,
+                clip_grad=max_norm,
+                parameters=model.parameters(),
+                create_graph=is_second_order,
+            )
         else:
             loss.backward()
-            if max_norm != None:
+
+            # ── NaN/inf gradient guard ──────────────────────────────────────
+            # The bidirectional Mamba SSM backward can explode to NaN through
+            # zero-padded pruned positions (A^2304 accumulation).  We zero out
+            # only the non-finite gradients so valid parameters still update.
+            nan_grad_params = []
+            for name, p in model.named_parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    nan_grad_params.append(name)
+                    p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+
+            if nan_grad_params:
+                # Report only once per 50 steps to avoid log spam
+                if not hasattr(train_one_epoch, '_nan_step_count'):
+                    train_one_epoch._nan_step_count = 0
+                train_one_epoch._nan_step_count += 1
+                if train_one_epoch._nan_step_count % 50 == 1:
+                    print(f"WARNING: non-finite grad zeroed in {len(nan_grad_params)} params "
+                          f"(first: '{nan_grad_params[0]}') — step proceeds with zeroed grads")
+
+            if max_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
+            # ────────────────────────────────────────────────────────────────
 
         torch.cuda.synchronize()
         if model_ema is not None:
@@ -109,7 +159,7 @@ def evaluate(data_loader, model, device, amp_autocast, verbose=False):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Test:'
+    header = "Test:"
 
     # switch to evaluation mode
     model.eval()
@@ -126,6 +176,7 @@ def evaluate(data_loader, model, device, amp_autocast, verbose=False):
         # compute output
         with amp_autocast():
             output = model(images)
+            print(f"**Input shape:{images.shape}")
             loss = criterion(output, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -141,8 +192,11 @@ def evaluate(data_loader, model, device, amp_autocast, verbose=False):
                 loss=f"{metric_logger.meters['loss'].global_avg:.3f}")
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
-          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+    print(
+        "* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}".format(
+            top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss
+        )
+    )
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 

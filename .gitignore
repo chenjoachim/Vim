@@ -17,3 +17,9 @@ causal-conv1d/
 work_dirs/
 __pycache__/
 .claude/
+*.swp
+**/__pycache__/**
+imnet_resnet50_scratch/timm_temp/
+.dumbo.json
+checkpoints/
+imagenette2-320/

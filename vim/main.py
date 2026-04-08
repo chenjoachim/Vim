@@ -19,7 +19,7 @@ from timm.utils import NativeScaler, get_state_dict, ModelEma
 
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate
-from losses import DistillationLoss
+from losses import DistillationLoss, DyVMLoss
 from samplers import RASampler
 from augment import new_data_aug_generator
 
@@ -216,6 +216,28 @@ def get_args_parser():
     parser.set_defaults(if_random_token_rank=False)
 
     parser.add_argument('--local-rank', default=0, type=int)
+
+    # ── DyVM joint loss (Eq. 27) ───────────────────────────────────────────
+    parser.add_argument('--use-dyvm-loss', action='store_true', default=False,
+                        help='Enable DyVM joint training loss (Lcls+Ltoken+Ldis_out+Ldis_token)')
+    parser.add_argument('--dyvm-token-ratio', type=float, default=0.7,
+                        help='Target token keep ratio ρ for Ltoken (default: 0.7)')
+    parser.add_argument('--dyvm-block-ratio', type=float, default=1.0,
+                        help='Target block selection ratio ρ_p for Lblock (default: 1.0, '
+                             'currently unused — block selection not yet implemented)')
+    parser.add_argument('--lambda-cls',       type=float, default=1.0,
+                        help='Weight for Lcls (default: 1.0)')
+    parser.add_argument('--lambda-token',     type=float, default=2.0,
+                        help='Weight for Ltoken (default: 2.0)')
+    parser.add_argument('--lambda-block',     type=float, default=0.0,
+                        help='Weight for Lblock (default: 0.0 — not yet implemented)')
+    parser.add_argument('--lambda-dis-out',   type=float, default=0.5,
+                        help='Weight for Ldis_out KL divergence (default: 0.5)')
+    parser.add_argument('--lambda-dis-token', type=float, default=0.5,
+                        help='Weight for Ldis_token token MSE (default: 0.5). '
+                             'Requires --teacher-model to be a VisionMamba.')
+    parser.add_argument('--dyvm-temperature', type=float, default=1.0,
+                        help='Temperature T for KL divergence in Ldis_out (default: 1.0)')
     return parser
 
 
@@ -437,11 +459,29 @@ def main(args):
         teacher_model.to(device)
         teacher_model.eval()
 
-    # wrap the criterion in our custom DistillationLoss, which
-    # just dispatches to the original criterion if args.distillation_type is 'none'
-    criterion = DistillationLoss(
-        criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
-    )
+    if args.use_dyvm_loss:
+        # ── DyVM joint loss ──────────────────────────────────────────────
+        # Teacher is optional: if not provided, Ldis_out and Ldis_token are skipped.
+        # For Ldis_token the teacher must be a VisionMamba (has forward_all_tokens).
+        criterion = DyVMLoss(
+            base_criterion=criterion,
+            teacher_model=teacher_model,
+            token_ratio=args.dyvm_token_ratio,
+            block_ratio=args.dyvm_block_ratio,
+            lambda_cls=args.lambda_cls,
+            lambda_token=args.lambda_token,
+            lambda_block=args.lambda_block,
+            lambda_dis_out=args.lambda_dis_out,
+            lambda_dis_token=args.lambda_dis_token,
+            temperature=args.dyvm_temperature,
+        )
+    else:
+        # wrap the criterion in our custom DistillationLoss, which
+        # just dispatches to the original criterion if args.distillation_type is 'none'
+        criterion = DistillationLoss(
+            criterion, teacher_model, args.distillation_type,
+            args.distillation_alpha, args.distillation_tau,
+        )
 
     output_dir = Path(args.output_dir)
     if args.resume:
