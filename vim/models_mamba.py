@@ -316,6 +316,7 @@ class VisionMamba(nn.Module):
         use_double_cls_token=False,
         use_middle_cls_token=True,
         token_ratio=0.7,
+        enable_dyvm=False,
         **kwargs,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -336,10 +337,10 @@ class VisionMamba(nn.Module):
         self.num_tokens = 1 if if_cls_token else 0
 
         # DyVM
-        self.token_ratio = (
-            token_ratio  # used at inference for deterministic top-K (Eq. 28-29)
-        )
-        self.bin_masks = MaskPredictor(embed_dim)
+        self.enable_dyvm = enable_dyvm
+        self.token_ratio = token_ratio
+        if enable_dyvm:
+            self.bin_masks = MaskPredictor(embed_dim)
 
         # pretrain parameters
         self.num_classes = num_classes
@@ -597,8 +598,7 @@ class VisionMamba(nn.Module):
             x = x + self.pos_embed
             x = self.pos_drop(x)
 
-            # print(f"DEBUG: Inside if_abs_pos_embed, skip_dyvm={skip_dyvm}")
-            if not skip_dyvm:
+            if self.enable_dyvm and not skip_dyvm:
                 print("DEBUG: Inside pruning block")
                 B_m, L_m, _ = x.shape
 
