@@ -27,7 +27,7 @@ python vim/quant.py \
   --alpha 0.5 \
   --epochs 100 \
   --lr-s 1e-3 --lr-w 5e-4 --lr-a 1e-4 \
-  --batch-size 32 \
+  --batch-size 64 \
   --num_workers 2 \
   --train-batch 16 \
   --save-quant ./checkpoints/dyvm_b_quant_w4a4.pth
