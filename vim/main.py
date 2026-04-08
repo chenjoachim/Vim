@@ -31,6 +31,7 @@ import utils
 
 # log about
 import mlflow
+import wandb
 
 
 def get_args_parser():
@@ -265,6 +266,7 @@ def main(args):
         mlflow.start_run(run_name=run_name)
         for key, value in vars(args).items():
             mlflow.log_param(key, value)
+        wandb.init(project="fastvim", name=run_name, config=vars(args))
 
     if not args.eval:
         dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
@@ -583,6 +585,7 @@ def main(args):
         if args.local_rank == 0 and args.gpu == 0:
             for key, value in log_stats.items():
                 mlflow.log_metric(key, value, log_stats['epoch'])
+            wandb.log(log_stats)
         
         
         if args.output_dir and utils.is_main_process():
