@@ -74,11 +74,23 @@ def JLSS(
     inputs = {}
     inputs_res = {}
     dim = model.layers[0].mixer.in_proj.in_features
-    seq = 197
-    inps = torch.zeros(
-        (args.batch_size, seq, dim), dtype=dtype, device=dev
-    )
-    
+    # determine token sequence length (patch tokens + cls tokens if present)
+    try:
+        num_patches = model.patch_embed.num_patches
+    except Exception:
+        # fallback if attribute missing
+        num_patches = getattr(model, 'num_patches', None)
+    num_tokens = getattr(model, 'num_tokens', 1)
+    if num_patches is None:
+        # last resort: infer from pos_embed if available
+        pos = getattr(model, 'pos_embed', None)
+        if pos is not None:
+            num_patches = pos.shape[1] - num_tokens
+        else:
+            raise RuntimeError('Cannot determine number of patches for model')
+    seq = num_patches + num_tokens
+    inps = torch.zeros((args.batch_size, seq, dim), dtype=dtype, device=dev)
+
     num_epoch = 0
     # Hook 함수 정의
     def hook_fn(module, input, output):

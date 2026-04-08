@@ -168,6 +168,47 @@ python vim/quant.py \
 - The activation scales file is named automatically based on model size: `smoothing_t.pt` (tiny), `smoothing_s.pt` (small), `smoothing_b.pt` (base).
 - Both Imagenette (`--data-set IMAGENETTE`) and ImageNet (`--data-set IMNET`) are supported.
 
+### Real-Time Latency Measurement
+
+To measure real inference latency using the actual INT GEMM kernel, first build the CUDA extension:
+
+```bash
+cd vim/cuda_measure
+git clone https://github.com/NVIDIA/cutlass.git
+python setup_vim_GEMM.py build_ext --inplace
+cd ../..
+```
+
+Then run latency benchmarks via SLURM:
+
+```bash
+# FP16 baseline
+sbatch vim/scripts/realtime_fp.sh
+
+# W8A8
+sbatch vim/scripts/realtime_w8a8.sh
+
+# W4A4
+sbatch vim/scripts/realtime_w4a4.sh
+```
+
+Or using `--real-gemm` directly with `--load-quant`:
+
+```bash
+export LD_LIBRARY_PATH=$(python -c "import torch; import os; print(os.path.dirname(torch.__file__))")/lib:$LD_LIBRARY_PATH
+
+python vim/quant.py \
+  --model vim_tiny_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_midclstok_div2 \
+  --data-path data/imagenet \
+  --data-set IMNET \
+  --qmode ptq4vm \
+  --load-quant ./checkpoints/vim_t_quant_w4a4.pth \
+  --real-gemm \
+  --batch-size 256
+```
+
+Output is median inference time in seconds per batch.
+
 ## Acknowledgement :heart:
 This project is based on Mamba ([paper](https://arxiv.org/abs/2312.00752), [code](https://github.com/state-spaces/mamba)), Causal-Conv1d ([code](https://github.com/Dao-AILab/causal-conv1d)), DeiT ([paper](https://arxiv.org/abs/2012.12877), [code](https://github.com/facebookresearch/deit)). Thanks for their wonderful works.
 

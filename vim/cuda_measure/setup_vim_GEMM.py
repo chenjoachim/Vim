@@ -12,7 +12,11 @@ setup(
             'vim_GEMM.cpp',
             'vim_GEMM_kernel.cu',
         ], include_dirs=[file_path],
-        extra_compile_args=["-std=c++17"])
+        extra_compile_args={
+            'cxx': ['-std=c++17'],
+            'nvcc': ['-std=c++17', '-gencode', 'arch=compute_80,code=sm_80',
+                     '-gencode', 'arch=compute_86,code=sm_86'],
+        })
     ],
     cmdclass={
         'build_ext': BuildExtension
