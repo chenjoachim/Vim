@@ -339,7 +339,7 @@ class VisionMamba(nn.Module):
         self.token_ratio = (
             token_ratio  # used at inference for deterministic top-K (Eq. 28-29)
         )
-        self.bin_masks = MaskPredictor(embed_dim)
+        self.score_predictors = MaskPredictor(embed_dim)
 
         # pretrain parameters
         self.num_classes = num_classes
@@ -608,7 +608,7 @@ class VisionMamba(nn.Module):
                 # if x_has_nan:
                 # print(f"DEBUG: NaN fraction in x: {torch.isnan(x).float().mean().item():.4f}")
 
-                raw_logits = self.bin_masks(x)  # [B, L, 2] — raw logits (no softmax)
+                raw_logits = self.score_predictors(x)  # [B, L, 2] — raw logits (no softmax)
                 # logits_nan = torch.isnan(raw_logits).any().item()
                 # clamp prevents overflow → inf → NaN in gumbel/softmax
                 # nan_to_num handles NaN that leaked from collapsed weights (clamp alone can't fix NaN)
