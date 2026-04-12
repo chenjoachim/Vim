@@ -152,6 +152,11 @@ def get_args_parser():
     parser.add_argument('--enable-dyvm', action='store_true',
                         help='enable DyVM token pruning in the model')
 
+    parser.add_argument('--mp-first-layers', type=int, default=0,
+                        help='quantize the first N layers at 8-bit regardless of n-lvw/n-lva')
+    parser.add_argument('--mp-last-layers', type=int, default=0,
+                        help='quantize the last N layers at 8-bit regardless of n-lvw/n-lva')
+
     return parser
 
 
