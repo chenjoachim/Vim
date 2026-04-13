@@ -1,6 +1,6 @@
 
 MODEL="vim_base_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_middle_cls_token_div2"
-CKPT="checkpoints/baseline_vim_b/checkpoint.pth"
+CKPT="checkpoints/baseline_vim_b/best_checkpoint.pth"
 DATA_PATH="./imagenet"
 OUTPUT_DIR="checkpoints/baseline_vim_b"
 
