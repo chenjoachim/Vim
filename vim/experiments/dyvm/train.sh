@@ -15,6 +15,7 @@ env -u SLURM_PROCID python vim/main.py \
   --batch-size 64 --lr 5e-5 --min-lr 1e-6 \
   --weight-decay 1e-8 --warmup-epochs 5 \
   --drop-path 0.0 --epochs 10 \
+  --eval-batch-size 64 \
   --enable-dyvm \
   --use-dyvm-loss --dyvm-token-ratio 0.7 \
   --output_dir $OUTPUT_DIR \
