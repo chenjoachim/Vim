@@ -325,21 +325,45 @@ def main(args):
             saved_args = quant_checkpoint.get('args', {})
             n_lvw = saved_args.get('n_lvw', 256)
             n_lva = saved_args.get('n_lva', 256)
+            mp_first = saved_args.get('mp_first_layers', 0)
+            mp_last = saved_args.get('mp_last_layers', 0)
+            symmetric_act = saved_args.get('symmetric_act', False)
+
+            # Count backbone layers (layers.<i>.*) to know the total for mp_last
+            import re
+            layer_re = re.compile(r'(?:^|\.)layers\.(\d+)\.')
+            layer_indices = set()
+            for name, _ in model_without_ddp.named_modules():
+                m = layer_re.search(name)
+                if m:
+                    layer_indices.add(int(m.group(1)))
+            n_layers = (max(layer_indices) + 1) if layer_indices else 0
+
+            def layer_nlv_for(name):
+                m = layer_re.search(name)
+                if m is not None:
+                    i = int(m.group(1))
+                    if i < mp_first or i >= n_layers - mp_last:
+                        return 256, 256
+                return n_lvw, n_lva
+
             for name, module in model_without_ddp.named_modules():
                 if isinstance(module, Q.Linear):
-                    module.n_lv = n_lvw
-                    module.qmax = n_lvw // 2 - 1
-                    module.qmin = -(n_lvw // 2 - 1)
+                    n_lvw_i, _ = layer_nlv_for(name)
+                    module.n_lv = n_lvw_i
+                    module.qmax = n_lvw_i // 2 - 1
+                    module.qmin = -(n_lvw_i // 2 - 1)
                     module.per_channel = module.s.dim() > 1
                     module.smoothing = True
                 if isinstance(module, Q.Act):
-                    module.n_lv = n_lva
-                    module.symmetric = saved_args.get('symmetric_act', False)
+                    _, n_lva_i = layer_nlv_for(name)
+                    module.n_lv = n_lva_i
+                    module.symmetric = symmetric_act
                     if module.symmetric:
-                        module.qmax = n_lva // 2 - 1
-                        module.qmin = -(n_lva // 2 - 1)
+                        module.qmax = n_lva_i // 2 - 1
+                        module.qmin = -(n_lva_i // 2 - 1)
                     else:
-                        module.qmax = n_lva - 1
+                        module.qmax = n_lva_i - 1
                         module.qmin = 0
                     module.per_token = module.s.dim() > 1
                     module.smoothing = True
