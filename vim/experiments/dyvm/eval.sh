@@ -14,7 +14,7 @@ env -u SLURM_PROCID python vim/main.py \
   --model $MODEL \
   --resume $CKPT \
   --data-set IMNET --data-path $DATA_PATH \
-  --batch-size 64 \
+  --batch-size 64 --eval-batch-size 64 \
   --enable-dyvm \
   --dyvm-token-ratio $TOKEN_RATIO \
   --eval \

@@ -36,6 +36,8 @@ import mlflow
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
+    parser.add_argument('--eval-batch-size', default=None, type=int,
+                        help='Batch size for validation (default: 1.5 * batch-size * 20)')
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--bce-loss', action='store_true')
     parser.add_argument('--unscale-lr', action='store_true')
@@ -321,9 +323,10 @@ def main(args):
         if args.ThreeAugment:
             data_loader_train.dataset.transform = new_data_aug_generator(args)
 
+    eval_batch_size = args.eval_batch_size if args.eval_batch_size is not None else int(1.5 * args.batch_size * 20)
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size * 20),
+        batch_size=eval_batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False
