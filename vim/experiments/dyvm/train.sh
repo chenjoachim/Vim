@@ -12,7 +12,7 @@ env -u SLURM_PROCID python vim/main.py \
   --model $MODEL \
   --finetune $FINETUNE_CKPT \
   --data-set IMNET --data-path $DATA_PATH \
-  --batch-size 64 --lr 5e-6 --min-lr 1e-7 \
+  --batch-size 32 --lr 5e-6 --min-lr 1e-7 \
   --weight-decay 1e-8 --warmup-epochs 5 \
   --drop-path 0.0 --epochs 10 \
   --eval-batch-size 64 \
