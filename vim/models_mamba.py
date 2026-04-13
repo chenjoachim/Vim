@@ -605,7 +605,7 @@ class VisionMamba(nn.Module):
 
             # print(f"DEBUG: Inside if_abs_pos_embed, skip_dyvm={skip_dyvm}")
             if self.enable_dyvm and not skip_dyvm:
-                print("DEBUG: Inside pruning block")
+                # print("DEBUG: Inside pruning block")
                 B_m, L_m, _ = x.shape
 
                 # Early NaN detection — if x is already NaN the predictor output will be NaN
