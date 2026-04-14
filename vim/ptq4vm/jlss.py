@@ -167,12 +167,23 @@ def JLSS(
     
     verbose = getattr(args, 'verbose', False)
     disable_tqdm = getattr(args, "rank", 0) != 0
-    layer_iter = range(len(layers))
+    n_layers = len(layers)
+    mp_first = getattr(args, 'mp_first_layers', 0)
+    mp_last = getattr(args, 'mp_last_layers', 0)
+
+    def layer_nlv(i):
+        """Return (n_lvw, n_lva) for layer i: 8-bit (256) if in the first/last MP range."""
+        if i < mp_first or i >= n_layers - mp_last:
+            return 256, 256
+        return args.n_lvw, args.n_lva
+
+    layer_iter = range(n_layers)
     if not verbose:
         layer_iter = tqdm(layer_iter, desc="Quantizing layers", disable=disable_tqdm)
     for i in layer_iter:
+        n_lvw_i, n_lva_i = layer_nlv(i)
         if verbose:
-            print(f"=== Start quantize layer {i} ===")
+            print(f"=== Start quantize layer {i} (w{n_lvw_i.bit_length()-1}a{n_lva_i.bit_length()-1}) ===")
         layer = layers[i].to(dev)
         qlayer = copy.deepcopy(layer)   
         qlayer = qlayer.to(dev)
@@ -198,11 +209,11 @@ def JLSS(
                             module.act_func.register_parameter("smooth_scale",torch.nn.Parameter(scale))
 
         if verbose:
-            Q.initialize(qlayer, fp_inps_0, fp_residual_0, args.n_lvw, args.n_lva, act=False, weight=True, per_channel=True, per_token=True, trunc=True)
+            Q.initialize(qlayer, fp_inps_0, fp_residual_0, n_lvw_i, n_lva_i, act=False, weight=True, per_channel=True, per_token=True, trunc=True)
         else:
             import io, contextlib
             with contextlib.redirect_stdout(io.StringIO()):
-                Q.initialize(qlayer, fp_inps_0, fp_residual_0, args.n_lvw, args.n_lva, act=False, weight=True, per_channel=True, per_token=True, trunc=True)
+                Q.initialize(qlayer, fp_inps_0, fp_residual_0, n_lvw_i, n_lva_i, act=False, weight=True, per_channel=True, per_token=True, trunc=True)
 
 
         

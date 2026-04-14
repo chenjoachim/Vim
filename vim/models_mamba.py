@@ -316,6 +316,7 @@ class VisionMamba(nn.Module):
         use_double_cls_token=False,
         use_middle_cls_token=True,
         token_ratio=0.7,
+        enable_dyvm=False,
         **kwargs,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -336,10 +337,10 @@ class VisionMamba(nn.Module):
         self.num_tokens = 1 if if_cls_token else 0
 
         # DyVM
-        self.token_ratio = (
-            token_ratio  # used at inference for deterministic top-K (Eq. 28-29)
-        )
-        self.bin_masks = MaskPredictor(embed_dim)
+        self.enable_dyvm = enable_dyvm
+        self.token_ratio = token_ratio
+        if enable_dyvm:
+            self.bin_masks = MaskPredictor(embed_dim)
 
         # pretrain parameters
         self.num_classes = num_classes
@@ -496,10 +497,6 @@ class VisionMamba(nn.Module):
             results.append(rearranged)
 
         rearranged_tokens = torch.stack(results, dim=0)
-        print(
-            f"DEBUG: reorder cls_positions min={min(cls_positions)}, max={max(cls_positions)}, "
-            f"unique_counts={len(set(cls_positions))}"
-        )
         return rearranged_tokens, cls_positions, None
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
@@ -537,19 +534,6 @@ class VisionMamba(nn.Module):
         # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
         # with slight modifications to add the dist_token
 
-        # Runs cheaply; fires the first time a weight goes NaN so we know exactly
-        # which parameter was corrupted and at what step.
-        _nan_params = [
-            name for name, p in self.named_parameters() if not torch.isfinite(p).all()
-        ]
-        if _nan_params:
-            print(
-                f"DEBUG PARAM NaN: {_nan_params[:5]}"
-                f"{'...' if len(_nan_params) > 5 else ''} "
-                f"(total {len(_nan_params)} NaN params)"
-            )
-        # ────────────────────────────────────────────────────────────────────
-
         x = self.patch_embed(x)
         B, M, _ = x.shape
 
@@ -576,7 +560,6 @@ class VisionMamba(nn.Module):
                         (x[:, :token_position, :], cls_token, x[:, token_position:, :]),
                         dim=1,
                     )
-                    print("token_position: ", token_position)
                 else:
                     cls_token = self.cls_token.expand(
                         B, -1, -1
@@ -584,7 +567,6 @@ class VisionMamba(nn.Module):
                     token_position = 0
                     x = torch.cat((cls_token, x), dim=1)
                 M = x.shape[1]
-                print(f"**shape after CLS: {x.shape}")
 
         # Initialise to None; set inside the masking block below if DyVM runs.
         dyvm_masks = None
@@ -597,9 +579,7 @@ class VisionMamba(nn.Module):
             x = x + self.pos_embed
             x = self.pos_drop(x)
 
-            # print(f"DEBUG: Inside if_abs_pos_embed, skip_dyvm={skip_dyvm}")
-            if not skip_dyvm:
-                print("DEBUG: Inside pruning block")
+            if self.enable_dyvm and not skip_dyvm:
                 B_m, L_m, _ = x.shape
 
                 # Early NaN detection — if x is already NaN the predictor output will be NaN
@@ -718,24 +698,13 @@ class VisionMamba(nn.Module):
             # Random token rank shuffle is incompatible with per-batch positions —
             # skip it when DyVM has already rearranged the sequence.
             if isinstance(token_position, list):
-                print(
-                    "DEBUG: skipping if_random_token_rank, DyVM reorder already active"
-                )
+                pass
             else:
-                # 生成随机 shuffle 索引
                 shuffle_indices = torch.randperm(M)
-                print("original value: ", x[0, token_position, 0])
-                print("original token_position: ", token_position)
-
-                # 执行 shuffle
                 x = x[:, shuffle_indices, :]
-
-                # 找到 cls token 在 shuffle 之后的新位置
                 token_position = torch.where(shuffle_indices == token_position)[
                     0
                 ].item()
-                print("new value: ", x[0, token_position, 0])
-                print("new token_position: ", token_position)
 
         if_flip_img_sequences = False
         if (
@@ -788,8 +757,6 @@ class VisionMamba(nn.Module):
                 hidden_states = hidden_states_f + hidden_states_b.flip([1])
                 residual = residual_f + residual_b.flip([1])
 
-                print(f"**hidden state shape: {hidden_states.shape}")
-                print(f"**residual shape: {residual.shape}")
 
         if not self.fused_add_norm:
             if residual is None:
@@ -843,9 +810,6 @@ class VisionMamba(nn.Module):
                     x_out = hidden_states[
                         torch.arange(B, device=hidden_states.device), pos_t, :
                     ]
-                    print(
-                        f"DEBUG: cls extraction — per-batch positions {token_position[:4]}..."
-                    )
                 else:
                     x_out = hidden_states[:, token_position, :]
         elif self.final_pool_type == "none":

@@ -17,6 +17,7 @@ causal-conv1d/
 work_dirs/
 __pycache__/
 .claude/
+.env
 *.swp
 **/__pycache__/**
 imnet_resnet50_scratch/timm_temp/

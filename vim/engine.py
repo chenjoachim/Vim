@@ -19,6 +19,7 @@ import utils
 import statistics
 from tqdm import tqdm
 import time
+import wandb
 
 
 def train_one_epoch(
@@ -39,15 +40,12 @@ def train_one_epoch(
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
-    header = "Epoch: [{}]".format(epoch)
-    print_freq = 10
 
     if args.cosub:
         criterion = torch.nn.BCEWithLogitsLoss()
 
-    # debug
-    # count = 0
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+    pbar = tqdm(data_loader, desc=f"Epoch {epoch}", disable=not utils.is_main_process())
+    for samples, targets in pbar:
         # count += 1
         # if count > 20:
         #     break
@@ -148,6 +146,11 @@ def train_one_epoch(
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        if wandb.run is not None:
+            wandb.log({"train_loss": loss_value, "lr": optimizer.param_groups[0]["lr"]})
+        pbar.set_postfix(
+            loss=f"{metric_logger.meters['loss'].global_avg:.3f}",
+            lr=f"{optimizer.param_groups[0]['lr']:.6f}")
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -176,7 +179,7 @@ def evaluate(data_loader, model, device, amp_autocast, verbose=False):
         # compute output
         with amp_autocast():
             output = model(images)
-            print(f"**Input shape:{images.shape}")
+
             loss = criterion(output, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))

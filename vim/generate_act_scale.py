@@ -141,6 +141,8 @@ def get_args_parser():
     parser.add_argument('--no-pin-mem', action='store_false', dest='pin_mem',
                         help='')
     parser.set_defaults(pin_mem=True)
+    parser.add_argument('--enable-dyvm', action='store_true',
+                        help='enable DyVM token pruning in the model')
     return parser
 
 
@@ -187,7 +189,8 @@ def main(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
-        img_size=args.input_size
+        img_size=args.input_size,
+        enable_dyvm=args.enable_dyvm,
     )
     model.to(device)
     model_without_ddp = model
