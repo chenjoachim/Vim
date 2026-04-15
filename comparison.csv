@@ -1,0 +1,15 @@
+Metric,Baseline,DyVM,Unit,Delta / Note
+Parameters,"97,598,440","97,599,978",params,DyVM better
+Top-1 Accuracy (eval),48.144,63.566,%,DyVM better
+Top-5 Accuracy (eval),69.528,74.120,%,DyVM better
+Top-1 Accuracy EMA (eval),79.620,72.522,%,Baseline better
+Best Top-1 (training log),48.144,63.566,%,DyVM better
+Epoch of best acc1,0,0,epoch,
+Train loss at best epoch,7.188,7.161,,DyVM faster
+Final epoch train loss,3.061,4.498,,Baseline faster
+Final epoch test acc1,0.492,14.872,%,DyVM better
+Latency (ms / batch),585.04,592.91,ms,Baseline faster
+Throughput,109.395,107.943,img/s,Baseline better
+Peak GPU memory,1806.250,1806.619,MB,Baseline faster
+Token keep ratio,—,0.701,,
+Token sparsity,—,0.299,,

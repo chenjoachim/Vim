@@ -23,3 +23,5 @@ imnet_resnet50_scratch/timm_temp/
 .dumbo.json
 checkpoints/
 imagenette2-320/
+imagenet
+imagenet_subset
