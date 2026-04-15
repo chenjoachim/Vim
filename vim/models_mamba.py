@@ -316,7 +316,7 @@ class VisionMamba(nn.Module):
         use_double_cls_token=False,
         use_middle_cls_token=True,
         token_ratio=0.7,
-        enable_dyvm=False,
+        enable_dyvm: bool = True,
         **kwargs,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -336,11 +336,16 @@ class VisionMamba(nn.Module):
         self.use_middle_cls_token = use_middle_cls_token
         self.num_tokens = 1 if if_cls_token else 0
 
-        # DyVM
+        # DyVM — both attributes always exist so checkpoints load cleanly
+        # regardless of enable_dyvm; score_predictors is Identity when disabled.
         self.enable_dyvm = enable_dyvm
-        self.token_ratio = token_ratio
+        self.token_ratio = (
+            token_ratio  # used at inference for deterministic top-K (Eq. 28-29)
+        )
         if enable_dyvm:
-            self.bin_masks = MaskPredictor(embed_dim)
+            self.score_predictors = MaskPredictor(embed_dim)
+        else:
+            self.score_predictors = nn.Identity()  # no-op placeholder, 0 extra params
 
         # pretrain parameters
         self.num_classes = num_classes
@@ -579,7 +584,9 @@ class VisionMamba(nn.Module):
             x = x + self.pos_embed
             x = self.pos_drop(x)
 
+            # print(f"DEBUG: Inside if_abs_pos_embed, skip_dyvm={skip_dyvm}")
             if self.enable_dyvm and not skip_dyvm:
+                # print("DEBUG: Inside pruning block")
                 B_m, L_m, _ = x.shape
 
                 # Early NaN detection — if x is already NaN the predictor output will be NaN
@@ -588,7 +595,7 @@ class VisionMamba(nn.Module):
                 # if x_has_nan:
                 # print(f"DEBUG: NaN fraction in x: {torch.isnan(x).float().mean().item():.4f}")
 
-                raw_logits = self.bin_masks(x)  # [B, L, 2] — raw logits (no softmax)
+                raw_logits = self.score_predictors(x)  # [B, L, 2] — raw logits (no softmax)
                 # logits_nan = torch.isnan(raw_logits).any().item()
                 # clamp prevents overflow → inf → NaN in gumbel/softmax
                 # nan_to_num handles NaN that leaked from collapsed weights (clamp alone can't fix NaN)

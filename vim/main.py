@@ -18,7 +18,7 @@ from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
 from datasets import build_dataset
-from engine import train_one_epoch, evaluate
+from engine import train_one_epoch, evaluate, time_measure, measure_sparsity
 from losses import DistillationLoss, DyVMLoss
 from samplers import RASampler
 from augment import new_data_aug_generator
@@ -37,6 +37,8 @@ import wandb
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
+    parser.add_argument('--eval-batch-size', default=None, type=int,
+                        help='Batch size for validation (default: 1.5 * batch-size * 20)')
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--bce-loss', action='store_true')
     parser.add_argument('--unscale-lr', action='store_true')
@@ -218,6 +220,18 @@ def get_args_parser():
 
     parser.add_argument('--local-rank', default=0, type=int)
 
+    # ── DyVM architecture + experiment flags ──────────────────────────────
+    parser.add_argument('--enable-dyvm', action='store_true', default=True,
+                        help='Enable DyVM token pruning in the model (score_predictors + pruning pass). '
+                             'Pass --no-enable-dyvm to get a clean baseline with no extra params.')
+    parser.add_argument('--no-enable-dyvm', action='store_false', dest='enable_dyvm')
+
+    # ── Timing / eval profiling ───────────────────────────────────────────
+    parser.add_argument('--time-measure', action='store_true', default=False,
+                        help='After eval, run latency benchmark and write results.json')
+    parser.add_argument('--time-measure-turns', type=int, default=200,
+                        help='Number of forward passes for the timing benchmark (default: 200)')
+
     # ── DyVM joint loss (Eq. 27) ───────────────────────────────────────────
     parser.add_argument('--use-dyvm-loss', action='store_true', default=False,
                         help='Enable DyVM joint training loss (Lcls+Ltoken+Ldis_out+Ldis_token)')
@@ -311,9 +325,10 @@ def main(args):
         if args.ThreeAugment:
             data_loader_train.dataset.transform = new_data_aug_generator(args)
 
+    eval_batch_size = args.eval_batch_size if args.eval_batch_size is not None else int(1.5 * args.batch_size * 20)
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size),
+        batch_size=eval_batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False
@@ -336,7 +351,7 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         img_size=args.input_size,
-        enable_dyvm=args.use_dyvm_loss,
+        enable_dyvm=args.enable_dyvm,
     )
 
                     
@@ -518,8 +533,46 @@ def main(args):
         test_stats = evaluate(data_loader_val, model, device, amp_autocast)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
 
-        test_stats = evaluate(data_loader_val, model_ema.ema, device, amp_autocast)
-        print(f"Accuracy of the ema network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        test_stats_ema = evaluate(data_loader_val, model_ema.ema, device, amp_autocast)
+        print(f"Accuracy of the ema network on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
+
+        results = {
+            "model": args.model,
+            "enable_dyvm": args.enable_dyvm,
+            "n_parameters": n_parameters,
+            "acc1": test_stats["acc1"],
+            "acc5": test_stats["acc5"],
+            "loss": test_stats["loss"],
+            "acc1_ema": test_stats_ema["acc1"],
+            "acc5_ema": test_stats_ema["acc5"],
+        }
+
+        if args.time_measure and utils.is_main_process():
+            latency_sec = time_measure(data_loader_val, model, amp_autocast, args.time_measure_turns)
+            batch_size = data_loader_val.batch_size
+            throughput = batch_size / latency_sec
+            peak_mem_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
+            results.update({
+                "latency_sec": latency_sec,
+                "throughput_img_per_sec": throughput,
+                "peak_gpu_mem_mb": peak_mem_mb,
+            })
+            print(f"Latency: {latency_sec*1000:.2f} ms/batch  |  "
+                  f"Throughput: {throughput:.1f} img/s  |  "
+                  f"Peak GPU mem: {peak_mem_mb:.1f} MB")
+
+        if args.enable_dyvm and utils.is_main_process():
+            sparsity = measure_sparsity(data_loader_val, model, device, amp_autocast)
+            results["token_keep_ratio"] = 1.0 - sparsity
+            results["token_sparsity"] = sparsity
+            print(f"Token sparsity: {sparsity*100:.1f}%  (keep ratio: {(1-sparsity)*100:.1f}%)")
+
+        if utils.is_main_process() and args.output_dir:
+            results_path = Path(args.output_dir) / "results.json"
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+            print(f"Results written to {results_path}")
+
         return
     
     # log about

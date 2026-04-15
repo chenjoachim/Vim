@@ -205,6 +205,45 @@ def evaluate(data_loader, model, device, amp_autocast, verbose=False):
 
 
 @torch.no_grad()
+def measure_sparsity(data_loader, model, device, amp_autocast):
+    """Compute average token sparsity (fraction pruned) over the validation set.
+
+    Returns a float in [0, 1]: fraction of non-cls tokens discarded by DyVM.
+    Returns 0.0 if the model has DyVM disabled (no masks produced).
+    """
+    model.eval()
+    total_kept = 0.0
+    total_tokens = 0
+    n_batches = 0
+
+    for images, _ in tqdm(data_loader, desc="Measuring sparsity", disable=not utils.is_main_process()):
+        images = images.to(device, non_blocking=True)
+        with amp_autocast():
+            output = model(images, return_aux=True)
+
+        if not (isinstance(output, tuple) and len(output) == 2 and isinstance(output[1], dict)):
+            # DyVM disabled — model returned plain logits
+            break
+
+        _, aux = output
+        masks_list = [m for m in aux.get("masks", []) if m is not None]
+        if not masks_list:
+            break
+
+        # Use the final-stage mask: [B, L]
+        mask = masks_list[-1].float()
+        total_kept += mask.sum().item()
+        total_tokens += mask.numel()
+        n_batches += 1
+
+    if total_tokens == 0 or n_batches == 0:
+        return 0.0
+
+    keep_ratio = total_kept / total_tokens
+    return 1.0 - keep_ratio  # sparsity = fraction pruned
+
+
+@torch.no_grad()
 def time_measure(data_loader, model, amp_autocast, test_turn):
     model.eval()
     B = data_loader.batch_size
