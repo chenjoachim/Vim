@@ -89,6 +89,12 @@ def JLSS(
         else:
             raise RuntimeError('Cannot determine number of patches for model')
     seq = num_patches + num_tokens
+    # DyVM slices the sequence at inference time (models_mamba.py): K = int(token_ratio * num_patches)
+    # kept patches + num_tokens cls tokens. Layer buffers must match the post-slice length.
+    if getattr(model, 'enable_dyvm', False):
+        token_ratio = getattr(model, 'token_ratio', 1.0)
+        K = max(1, int(token_ratio * num_patches))
+        seq = K + num_tokens
     inps = torch.zeros((args.batch_size, seq, dim), dtype=dtype, device=dev)
 
     num_epoch = 0

@@ -13,7 +13,7 @@ import argparse
 import torch
 
 
-OLD_NAME = "bin_mask"
+OLD_NAME = "bin_masks"
 NEW_NAME = "score_predictors"
 
 

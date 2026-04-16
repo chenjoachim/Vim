@@ -47,38 +47,38 @@ python vim/quant.py \
 EOF
 )
 
-sbatch --dependency=afterok:${W8A8_JID} <<EOF
-#!/bin/bash
-#SBATCH --partition=gpunodes
-#SBATCH --gres=gpu:rtx_a4500:1
-#SBATCH --mem=20GB
-#SBATCH --time=00:29:59
-#SBATCH --exclude=gpunode16
-#SBATCH --job-name=dyvm_b_eval_w8a8
-#SBATCH --output=/u/chenjoachim/log/dyvm_b_eval_w8a8_%j.out
-#SBATCH --error=/u/chenjoachim/log/dyvm_b_eval_w8a8_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=chenjoachim63@proton.me
+# sbatch --dependency=afterok:${W8A8_JID} <<EOF
+# #!/bin/bash
+# #SBATCH --partition=gpunodes
+# #SBATCH --gres=gpu:rtx_a4500:1
+# #SBATCH --mem=20GB
+# #SBATCH --time=00:29:59
+# #SBATCH --exclude=gpunode16
+# #SBATCH --job-name=dyvm_b_eval_w8a8
+# #SBATCH --output=/u/chenjoachim/log/dyvm_b_eval_w8a8_%j.out
+# #SBATCH --error=/u/chenjoachim/log/dyvm_b_eval_w8a8_%j.err
+# #SBATCH --mail-type=END,FAIL
+# #SBATCH --mail-user=chenjoachim63@proton.me
 
-source .venv/bin/activate
-set -a; source .env; set +a
+# source .venv/bin/activate
+# set -a; source .env; set +a
 
-python vim/quant.py \
-  --enable-dyvm \
-  --model ${BASE_MODEL_CONFIG} \
-  --data-path data/imagenet_subset \
-  --data-set IMNET \
-  --qmode ptq4vm \
-  --load-quant ${W8A8_CKPT} \
-  --batch-size 256 \
-  --num_workers 2 \
-  --eval
-EOF
+# python vim/quant.py \
+#   --enable-dyvm \
+#   --model ${BASE_MODEL_CONFIG} \
+#   --data-path data/imagenet_subset \
+#   --data-set IMNET \
+#   --qmode ptq4vm \
+#   --load-quant ${W8A8_CKPT} \
+#   --batch-size 256 \
+#   --num_workers 2 \
+#   --eval
+# EOF
 
-echo "Submitted quant ${W8A8_JID} → eval (chained) for w8a8"
+# echo "Submitted quant ${W8A8_JID} → eval (chained) for w8a8"
 
 # (mp_first mp_last)
-CONFIGS=("0 0" "0 1" "1 0" "1 1" "2 2" "4 4")
+CONFIGS=("0 0" "4 0" "8 0" "12 0" "16 0" "20 0")
 
 for cfg in "${CONFIGS[@]}"; do
   MP_FIRST=$(echo $cfg | awk '{print $1}')
@@ -123,33 +123,33 @@ python vim/quant.py \
 EOF
 )
 
-  sbatch --dependency=afterok:${QUANT_JID} <<EOF
-#!/bin/bash
-#SBATCH --partition=gpunodes
-#SBATCH --gres=gpu:rtx_a4500:1
-#SBATCH --mem=20GB
-#SBATCH --time=00:29:59
-#SBATCH --exclude=gpunode16
-#SBATCH --job-name=dyvm_b_eval_${TAG}
-#SBATCH --output=/u/chenjoachim/log/dyvm_b_eval_${TAG}_%j.out
-#SBATCH --error=/u/chenjoachim/log/dyvm_b_eval_${TAG}_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=chenjoachim63@proton.me
+#   sbatch --dependency=afterok:${QUANT_JID} <<EOF
+# #!/bin/bash
+# #SBATCH --partition=gpunodes
+# #SBATCH --gres=gpu:rtx_a4500:1
+# #SBATCH --mem=20GB
+# #SBATCH --time=00:29:59
+# #SBATCH --exclude=gpunode16
+# #SBATCH --job-name=dyvm_b_eval_${TAG}
+# #SBATCH --output=/u/chenjoachim/log/dyvm_b_eval_${TAG}_%j.out
+# #SBATCH --error=/u/chenjoachim/log/dyvm_b_eval_${TAG}_%j.err
+# #SBATCH --mail-type=END,FAIL
+# #SBATCH --mail-user=chenjoachim63@proton.me
 
-source .venv/bin/activate
-set -a; source .env; set +a
+# source .venv/bin/activate
+# set -a; source .env; set +a
 
-python vim/quant.py \
-  --enable-dyvm \
-  --model ${BASE_MODEL_CONFIG} \
-  --data-path data/imagenet_subset \
-  --data-set IMNET \
-  --qmode ptq4vm \
-  --load-quant ${CKPT} \
-  --batch-size 256 \
-  --num_workers 2 \
-  --eval
-EOF
+# python vim/quant.py \
+#   --enable-dyvm \
+#   --model ${BASE_MODEL_CONFIG} \
+#   --data-path data/imagenet_subset \
+#   --data-set IMNET \
+#   --qmode ptq4vm \
+#   --load-quant ${CKPT} \
+#   --batch-size 256 \
+#   --num_workers 2 \
+#   --eval
+# EOF
 
   echo "Submitted quant ${QUANT_JID} → eval (chained) for ${TAG}"
 done

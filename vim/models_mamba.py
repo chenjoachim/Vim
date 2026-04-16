@@ -694,8 +694,12 @@ class VisionMamba(nn.Module):
                     x, token_position, orig_indices = self.reorder(
                         x, token_position, mask=masks
                     )
-                    # All batch items have the same K in inference → cls_positions are all K//2
-                    # print(f"DEBUG: After reorder - x shape: {x.shape}, token_position (list): {token_position[:4]}...")
+                    # Inference: K is constant across the batch, so we can actually
+                    # shrink the sequence. reorder() packs [kept_left | cls | kept_right | zeros],
+                    # and K + 1 (kept patches + cls) live at the front — slice off the zero tail
+                    # so every downstream Mamba layer runs on a shorter sequence.
+                    x = x[:, : K + 1, :].contiguous()
+                    M = x.shape[1]
                     token_position = (
                         K // 2
                     )  # scalar: consistent across batch in inference

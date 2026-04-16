@@ -70,22 +70,54 @@ class Q_Linear(nn.Linear):
         with torch.no_grad():
             weight = self.weight * self.act_func.smooth_scale
             if self.n_lv == 256:
-                qmax = self.n_lv // 2 - 1  # 127
-                weight = F.hardtanh(weight / self.s, -qmax, qmax)
-                self.int_weight = torch.round(weight).to(torch.int8).detach()
-                self.w_col_sum = self.int_weight.float().sum(dim=1)  # (n,)
                 self.qbit = 8
+                align = 16
             elif self.n_lv == 16:
-                qmax = self.n_lv // 2 - 1  # 7
-                weight = F.hardtanh(weight / self.s, -qmax, qmax)
-                int_weight = torch.round(weight).to(torch.int8).detach()
-                self.w_col_sum = int_weight.float().sum(dim=1)  # (n,) - computed before packing
-                # Pack two int4 values into one byte: low nibble = w[2i], high nibble = w[2i+1]
-                n_rows, k = int_weight.shape
-                assert k % 2 == 0, f"k={k} must be even for int4 packing"
-                w_flat = (int_weight.view(n_rows, k // 2, 2).to(torch.uint8) & 0x0F)
-                self.int_weight = (w_flat[:, :, 0] | (w_flat[:, :, 1] << 4)).detach()  # (n, k/2) uint8
                 self.qbit = 4
+                align = 32
+            qmax = self.n_lv // 2 - 1
+            weight = F.hardtanh(weight / self.s, -qmax, qmax)
+            int_weight = torch.round(weight).to(torch.int8).detach()  # (n, k)
+
+            # Pre-pad weight+smooth_scale once so forward() doesn't re-allocate each call.
+            # Zero-padding preserves dot products, so w_col_sum and accuracy are unchanged.
+            k = int_weight.shape[1]
+            pad = (align - k % align) % align
+            self._gemm_pad = pad
+            if pad > 0:
+                int_weight = F.pad(int_weight.float(), (0, pad)).to(torch.int8)
+                padded_smooth = F.pad(self.act_func.smooth_scale.detach(), (0, pad)).contiguous()
+                self.register_buffer("_padded_smooth_scale", padded_smooth)
+
+            self.w_col_sum = int_weight.float().sum(dim=1)  # (n,)
+
+            if self.qbit == 8:
+                self.int_weight = int_weight.contiguous()
+            else:
+                # Pack two int4 values into one byte: low nibble = w[2i], high nibble = w[2i+1]
+                n_rows, new_k = int_weight.shape
+                assert new_k % 2 == 0, f"k={new_k} must be even for int4 packing"
+                w_flat = (int_weight.view(n_rows, new_k // 2, 2).to(torch.uint8) & 0x0F)
+                self.int_weight = (w_flat[:, :, 0] | (w_flat[:, :, 1] << 4)).detach().contiguous()
+
+            # Hoist invariants out of forward(): squeeze/unsqueeze/contiguous on act scale+zero,
+            # pre-contiguous the weight scale, and prime the import path for vim_GEMM once.
+            self._scale_x_base = self.act_func.s.detach().squeeze().unsqueeze(-1).contiguous()
+            self._z_base = self.act_func.z.detach().squeeze().unsqueeze(-1).contiguous()
+            self._per_token = self._scale_x_base.numel() > 1
+            self._s_contig = self.s.detach().contiguous()
+            # Dtype/batch-dependent pieces get built lazily on first forward.
+            self._cached_dtype = None
+            self._cached_batch = None
+            self._cached_scale_x = None
+            self._cached_z = None
+            self._cached_w_col_sum = None
+
+            import sys, os
+            _gemm_path = os.path.join(os.path.dirname(__file__), '..', 'cuda_measure')
+            if _gemm_path not in sys.path:
+                sys.path.insert(0, _gemm_path)
+            import vim_GEMM  # noqa: F401  (warm the import cache)
 
     def initialize(self, n_lv, per_channel=False, trunc=False):
         x = self.weight * self.act_func.smooth_scale
@@ -166,58 +198,47 @@ class Q_Linear(nn.Linear):
             x = self.act_func(x)
         
         if self.real_int8:
-            import sys, os
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'cuda_measure'))
-            import vim_GEMM
-            scale_x = self.act_func.s.squeeze().unsqueeze(-1).contiguous()  # (seq_len, 1) or (1, 1)
-            z = self.act_func.z.squeeze().unsqueeze(-1).contiguous()  # same shape as scale_x
-            if scale_x.numel() > 1:  # per-token: kernel indexes over batch*seq_len rows
-                scale_x = scale_x.repeat(x.shape[0], 1).contiguous()  # (batch*seq_len, 1)
-                z = z.repeat(x.shape[0], 1).contiguous()
-            z = z.to(x.dtype)
-            smooth_scale = self.act_func.smooth_scale
-            w_col_sum = self.w_col_sum.to(x.dtype).contiguous()
-            k = x.shape[-1]
-            if self.qbit == 4:
-                # int4: k must be even (for packing) and meet alignment
-                align = 32  # CUTLASS int4 typically needs k divisible by 32
-                pad = (align - k % align) % align
-                if pad > 0:
-                    x = F.pad(x.contiguous(), (0, pad))
-                    # Unpack, pad, repack weight for padded k
-                    n_rows = self.int_weight.shape[0]
-                    lo = self.int_weight & 0x0F
-                    hi = (self.int_weight >> 4) & 0x0F
-                    w_unpacked = torch.stack([lo, hi], dim=-1).view(n_rows, -1).to(torch.int8)
-                    w_unpacked = F.pad(w_unpacked.float(), (0, pad)).to(torch.int8)
-                    new_k = k + pad
-                    w_flat = (w_unpacked.view(n_rows, new_k // 2, 2).to(torch.uint8) & 0x0F)
-                    w = (w_flat[:, :, 0] | (w_flat[:, :, 1] << 4))
-                    smooth_scale = F.pad(smooth_scale, (0, pad))
-                else:
-                    w = self.int_weight
+            import vim_GEMM  # already primed in set_real_int8()
+
+            dtype = x.dtype
+            if self._cached_dtype is not dtype:
+                self._cached_dtype = dtype
+                self._cached_z = self._z_base.to(dtype).contiguous()
+                self._cached_w_col_sum = self.w_col_sum.to(dtype).contiguous()
+                self._cached_batch = None  # bcast tensors depend on cached_z dtype
+
+            if self._per_token:
+                batch = x.shape[0]
+                if self._cached_batch != batch:
+                    self._cached_batch = batch
+                    # per-token: kernel indexes over batch*seq_len rows
+                    self._cached_scale_x = self._scale_x_base.repeat(batch, 1).contiguous()
+                    self._cached_z_bcast = self._cached_z.repeat(batch, 1).contiguous()
+                scale_x = self._cached_scale_x
+                z = self._cached_z_bcast
             else:
-                # int8: standard alignment
-                align = 16
-                pad = (align - k % align) % align
-                if pad > 0:
-                    x = F.pad(x.contiguous(), (0, pad))
-                    w = F.pad(self.int_weight.float(), (0, pad)).to(torch.int8)
-                    smooth_scale = F.pad(smooth_scale, (0, pad))
-                else:
-                    w = self.int_weight
+                scale_x = self._scale_x_base
+                z = self._cached_z
 
-            kernel_qbit = self.qbit
+            # Weight + smooth_scale were pre-padded in set_real_int8(); only x needs per-call padding.
+            pad = self._gemm_pad
+            if pad > 0:
+                x = F.pad(x.contiguous(), (0, pad))
+                smooth_scale = self._padded_smooth_scale
+            else:
+                smooth_scale = self.act_func.smooth_scale
 
-            result = vim_GEMM.vim_GEMM(x.contiguous(), \
-                    w.contiguous(), \
-                    smooth_scale.contiguous(), \
-                    scale_x, \
-                    self.s.contiguous(), \
-                    z.contiguous(), \
-                    w_col_sum, \
-                    16, \
-                    kernel_qbit)
+            result = vim_GEMM.vim_GEMM(
+                x.contiguous(),
+                self.int_weight,
+                smooth_scale,
+                scale_x,
+                self._s_contig,
+                z,
+                self._cached_w_col_sum,
+                16,
+                self.qbit,
+            )
 
             if self.bias is not None:
                 result = result + self.bias

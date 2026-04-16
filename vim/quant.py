@@ -27,6 +27,32 @@ import models_mamba
 
 import torch.nn as nn
 
+def report_ideal_ckpt_size(model, Q=None):
+    """Print ideal checkpoint size S = (1/8) * sum_l P_l * b_l bytes.
+
+    Walks the full state_dict (parameters + buffers). For Q_Linear `weight`
+    entries with a calibrated bit-width, uses log2(n_lv) instead of the
+    tensor's native dtype; everything else counts at its dtype's bit width.
+    """
+    quant_weight_bits = {}  # state_dict key -> ideal bit width
+    if Q is not None:
+        for name, module in model.named_modules():
+            if isinstance(module, Q.Linear) and module.n_lv in (16, 256):
+                bits = 4 if module.n_lv == 16 else 8
+                key = f"{name}.weight" if name else "weight"
+                quant_weight_bits[key] = bits
+
+    total_bits = 0
+    for key, tensor in model.state_dict().items():
+        if key in quant_weight_bits:
+            total_bits += tensor.numel() * quant_weight_bits[key]
+        else:
+            total_bits += tensor.numel() * tensor.element_size() * 8
+    bytes_ = total_bits // 8
+    print(f"[ideal-ckpt-size] {bytes_} bytes ({bytes_ / 1024 / 1024:.3f} MiB)")
+    return bytes_
+
+
 def add_new_module(name, original_module, added_module):
     levels = name.split('.')
     if len(levels) > 1:
@@ -144,9 +170,13 @@ def get_args_parser():
 
     parser.add_argument('--real-gemm', action='store_true',
                         help='enable real INT GEMM kernel and measure latency')
+    parser.add_argument('--validate', action='store_true',
+                        help='apply real INT GEMM kernel and evaluate accuracy (no timing)')
     parser.add_argument('--symmetric-act', action='store_true',
                         help='use symmetric activation quantization (ablation)')
 
+    parser.add_argument('--report-ckpt-size', action='store_true',
+                        help='print ideal checkpoint size S = (1/8) * sum_l P_l * b_l (bytes)')
     parser.add_argument('--verbose', action='store_true',
                         help='use verbose logging instead of tqdm progress bars')
     parser.add_argument('--enable-dyvm', action='store_true',
@@ -370,47 +400,41 @@ def main(args):
 
         model_without_ddp.to(device)
 
-        if args.real_gemm and Q is not None:
+        if args.report_ckpt_size:
+            report_ideal_ckpt_size(model_without_ddp, Q=Q)
+
+        if (args.validate or args.real_gemm) and Q is not None:
             for name, module in model_without_ddp.named_modules():
                 if isinstance(module, Q.Linear):
                     module.set_real_int8()
                     module.act_func.set_real_int8()
+
+        if args.validate:
             test_stats = evaluate(data_loader_val, model_without_ddp, device, amp_autocast, verbose=args.verbose)
             print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        elif args.real_gemm:
             time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
-            if args.profile:
-                from torch.profiler import profile, ProfilerActivity
-                B = data_loader_val.batch_size
-                C, H, W = data_loader_val.dataset[0][0].shape
-                sample = torch.randn(B, C, H, W).to(device)
-                for _ in range(5):
-                    with amp_autocast():
-                        model_without_ddp(sample)
-                torch.cuda.synchronize()
-                with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
-                    with amp_autocast():
-                        model_without_ddp(sample)
-                    torch.cuda.synchronize()
-                print("\n=== QUANTIZED MODEL GPU PROFILE ===")
-                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
         else:
             test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
             print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-            if args.profile:
-                from torch.profiler import profile, ProfilerActivity
-                B = data_loader_val.batch_size
-                C, H, W = data_loader_val.dataset[0][0].shape
-                sample = torch.randn(B, C, H, W).to(device)
-                for _ in range(5):
-                    with amp_autocast():
-                        model(sample)
+
+        if args.profile:
+            from torch.profiler import profile, ProfilerActivity
+            B = data_loader_val.batch_size
+            C, H, W = data_loader_val.dataset[0][0].shape
+            sample = torch.randn(B, C, H, W).to(device)
+            m = model_without_ddp if (args.validate or args.real_gemm) else model
+            for _ in range(5):
+                with amp_autocast():
+                    m(sample)
+            torch.cuda.synchronize()
+            with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+                with amp_autocast():
+                    m(sample)
                 torch.cuda.synchronize()
-                with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
-                    with amp_autocast():
-                        model(sample)
-                    torch.cuda.synchronize()
-                print("\n=== FP16 MODEL GPU PROFILE ===")
-                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
+            label = "QUANTIZED MODEL" if (args.validate or args.real_gemm) else "FP16 MODEL"
+            print(f"\n=== {label} GPU PROFILE ===")
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
         return
 
     if args.resume:
@@ -456,7 +480,19 @@ def main(args):
             import gc; gc.collect()
             torch.cuda.empty_cache()
 
-        if args.real_gemm:
+        if args.report_ckpt_size:
+            report_ideal_ckpt_size(model_without_ddp, Q=Q)
+
+        if (args.validate or args.real_gemm) and Q is not None:
+            for name, module in model_without_ddp.named_modules():
+                if isinstance(module, Q.Linear) and module.n_lv != 0:
+                    module.set_real_int8()
+                    module.act_func.set_real_int8()
+
+        if args.validate:
+            test_stats = evaluate(data_loader_val, model_without_ddp, device, amp_autocast, verbose=args.verbose)
+            print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        elif args.real_gemm:
             time_measure(data_loader_val, model_without_ddp, amp_autocast, 100)
         else:
             test_stats = evaluate(data_loader_val, model, device, amp_autocast, verbose=args.verbose)
@@ -467,7 +503,7 @@ def main(args):
             B = data_loader_val.batch_size
             C, H, W = data_loader_val.dataset[0][0].shape
             sample = torch.randn(B, C, H, W).to(device)
-            m = model_without_ddp if args.real_gemm else model
+            m = model_without_ddp if (args.validate or args.real_gemm) else model
             for _ in range(5):
                 with amp_autocast():
                     m(sample)

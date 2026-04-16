@@ -256,13 +256,16 @@ def time_measure(data_loader, model, amp_autocast, test_turn):
             model(sample_image)
     torch.cuda.synchronize()
 
-    time_per_batch = []
+    # Use CUDA events so we only pay one host sync for the whole measurement.
+    # Events are queued on the stream; elapsed_time() reports GPU-side duration.
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(test_turn)]
+    end_events   = [torch.cuda.Event(enable_timing=True) for _ in range(test_turn)]
     for i in tqdm(range(test_turn)):
         with amp_autocast():
-            torch.cuda.synchronize()
-            start = time.time()
+            start_events[i].record()
             output = model(sample_image)
-            torch.cuda.synchronize()
-            time_per_batch.append(time.time() - start)
+            end_events[i].record()
+    torch.cuda.synchronize()
+    time_per_batch = [s.elapsed_time(e) / 1000.0 for s, e in zip(start_events, end_events)]
     print(f"{statistics.median(time_per_batch):.8f} sec")
     return statistics.median(time_per_batch)
